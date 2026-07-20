@@ -1,0 +1,5 @@
+portfolio.db
+.env
+__pycache__/
+*.png
+*.pdf
