@@ -10,11 +10,13 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    ContextTypes
+    ContextTypes,
+    MessageHandler,
+    filters
 )
 
 # Logging Ayarları
@@ -26,7 +28,7 @@ logging.basicConfig(
 BOT_TOKEN = os.getenv("BOT_TOKEN", "TELEGRAM_BOT_TOKEN_BURAYA")
 ADMIN_ID = os.getenv("ADMIN_ID", "0")
 
-# UptimeRobot & 7/24 Aktif Kalma İçin Flask Web Sunucusu
+# Flask Web Sunucusu (7/24 Aktif Kalma)
 app = Flask(__name__)
 
 @app.route('/')
@@ -41,7 +43,20 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# SQLite Veritabanı Kurulumu (WAL Modu - Kilitlenme Önleyici)
+# Alt Menü Buton Klavyesi (Görselindeki İle Birebir)
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("📊 Portföyüm"), KeyboardButton("📈 Grafik")],
+        [KeyboardButton("👀 Takip Listesi"), KeyboardButton("➕ Fon Ekle")],
+        [KeyboardButton("🗑️ Fon Sil"), KeyboardButton("💵 Nakit")],
+        [KeyboardButton("📈 Ort. Performans"), KeyboardButton("🔍 Fon Ara")],
+        [KeyboardButton("⏰ Alarmlar"), KeyboardButton("📜 Geçmiş")],
+        [KeyboardButton("📄 PDF Raporu"), KeyboardButton("👁️ Tutarları Göster")]
+    ],
+    resize_keyboard=True
+)
+
+# SQLite Veritabanı
 def init_db():
     conn = sqlite3.connect("portfolio.db")
     cursor = conn.cursor()
@@ -114,7 +129,6 @@ def db_clear_portfolio(user_id: int):
     conn.commit()
     conn.close()
 
-# Fiyat Çekme Servisi (TEFAS / Midas)
 def fetch_price(symbol: str) -> float:
     symbol = symbol.upper().strip()
     try:
@@ -129,30 +143,24 @@ def fetch_price(symbol: str) -> float:
         pass
     return 0.0
 
-# Telegram Komut Fonksiyonları
+# Komut ve Buton Fonksiyonları
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📊 *Midas & TEFAS Portföy Takip Botu*\n\n"
-        "Komutlar:\n"
-        "🔹 `/ekle <sembol> <adet> <maliyet>` - Varlık ekle/güncelle\n"
-        "🔹 `/sil <sembol>` - Varlık çıkar\n"
-        "🔹 `/portfoy` - Portföy özetini gör\n"
-        "🔹 `/grafik` - Portföy dağılım grafiğini al\n"
-        "🔹 `/sifirla` - Tüm portföyü temizle\n"
-        "🔹 `/yardim` - Kullanım kılavuzu"
+        "Aşağıdaki menü butonlarını kullanarak işlem yapabilir veya komut yazabilirsiniz:\n"
+        "🔹 `/ekle <sembol> <adet> <maliyet>`\n"
+        "🔹 `/sil <sembol>`"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "💡 *Kullanım Örnekleri:*\n\n"
-        "`/ekle TP2 1000 2.15` -> 1000 adet TP2 fonu 2.15 TL maliyetle ekler.\n"
-        "`/ekle THYAO 50 280.50` -> 50 adet THYAO hissesi ekler.\n"
-        "`/sil TP2` -> TP2 fonunu portföyden siler.\n"
-        "`/portfoy` -> Anlık kar/zarar ve toplam değeri gösterir.\n"
-        "`/grafik` -> Portföyünün pasta grafiğini üretir."
+        "`/ekle TP2 1000 2.15` -> 1000 adet TP2 fonu ekler.\n"
+        "`/sil TP2` -> TP2 fonunu siler.\n"
+        "`/portfoy` veya **📊 Portföyüm** butonu ile özeti görebilirsin."
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
 
 async def ekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -181,7 +189,7 @@ async def portfoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     items = db_get_portfolio(user_id)
     if not items:
-        await update.message.reply_text("📭 Portföyünüzde henüz varlık bulunmuyor. `/ekle` komutu ile ekleyebilirsiniz.")
+        await update.message.reply_text("📭 Portföyünüzde henüz varlık bulunmuyor. `/ekle` komutu ile ekleyebilirsiniz.", reply_markup=MAIN_KEYBOARD)
         return
 
     text = "💼 *PORTFÖY ÖZETİ*\n"
@@ -219,13 +227,13 @@ async def portfoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"📈 *Toplam Değer:* `{total_value_sum:,.2f} TL`\n"
     text += f"{total_icon} *Toplam Kar/Zarar:* `{total_pnl:,.2f} TL` (%{total_pnl_pct:.2f})\n"
 
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
 
 async def grafik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     items = db_get_portfolio(user_id)
     if not items:
-        await update.message.reply_text("📭 Grafiğini oluşturmak için portföyünüzde en az 1 varlık olmalı.")
+        await update.message.reply_text("📭 Grafiğini oluşturmak için portföyünüzde en az 1 varlık olmalı.", reply_markup=MAIN_KEYBOARD)
         return
 
     labels = []
@@ -257,27 +265,22 @@ async def grafik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buf.seek(0)
     plt.close()
 
-    await update.message.reply_photo(photo=buf, caption="📊 Portföy Dağılım Grafiğiniz")
+    await update.message.reply_photo(photo=buf, caption="📊 Portföy Dağılım Grafiğiniz", reply_markup=MAIN_KEYBOARD)
 
-async def sifirla(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    db_clear_portfolio(user_id)
-    await update.message.reply_text("🧹 Portföyünüz tamamen sıfırlandı.")
+async def fon_ekle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("➕ Fon eklemek için lütfen şu formatta mesaj gönderin:\n`/ekle <sembol> <adet> <maliyet>`\n\nÖrnek: `/ekle TP2 1000 2.15`", parse_mode="Markdown")
+
+async def fon_sil_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🗑️ Fon silmek için lütfen şu formatta mesaj gönderin:\n`/sil <sembol>`\n\nÖrnek: `/sil TP2`", parse_mode="Markdown")
+
+async def genel_buton_cevap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"🛠️ **{update.message.text}** özelliği yakında aktif edilecektir.", parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
 
 # Otomatik Çökme Bildirimi
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Hata oluştu: {context.error}")
-    try:
-        if ADMIN_ID and int(ADMIN_ID) != 0:
-            await context.bot.send_message(
-                chat_id=int(ADMIN_ID),
-                text=f"⚠️ **Bot Sistem Hatası:**\n`{context.error}`",
-                parse_mode="Markdown"
-            )
-    except Exception as e:
-        logging.error(f"Hata bildirimi atılamadı: {e}")
 
-# Ana Döngü (Crash Proof - Sonsuz Çalışma)
+# Ana Döngü
 def main():
     init_db()
     keep_alive()
@@ -287,16 +290,27 @@ def main():
             logging.info("Bot başlatılıyor...")
             application = ApplicationBuilder().token(BOT_TOKEN).build()
             
+            # Slash Komutları
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CommandHandler("yardim", help_cmd))
             application.add_handler(CommandHandler("ekle", ekle))
             application.add_handler(CommandHandler("sil", sil))
             application.add_handler(CommandHandler("portfoy", portfoy))
             application.add_handler(CommandHandler("grafik", grafik))
-            application.add_handler(CommandHandler("sifirla", sifirla))
+            
+            # Buton Yazı Yakalayıcıları (Text Filters)
+            application.add_handler(MessageHandler(filters.Regex(r"^📊 Portföyüm$"), portfoy))
+            application.add_handler(MessageHandler(filters.Regex(r"^📈 Grafik$"), grafik))
+            application.add_handler(MessageHandler(filters.Regex(r"^➕ Fon Ekle$"), fon_ekle_prompt))
+            application.add_handler(MessageHandler(filters.Regex(r"^🗑️ Fon Sil$"), fon_sil_prompt))
+            
+            # Diğer Butonlar İçin Genel Yakalayıcı
+            application.add_handler(MessageHandler(
+                filters.Regex(r"^(👀 Takip Listesi|💵 Nakit|📈 Ort\. Performans|🔍 Fon Ara|⏰ Alarmlar|📜 Geçmiş|📄 PDF Raporu|👁️ Tutarları Göster)$"),
+                genel_buton_cevap
+            ))
             
             application.add_error_handler(error_handler)
-            
             application.run_polling(drop_pending_updates=True)
         except Exception as e:
             logging.error(f"Bot çöktü, 5 saniye içinde yeniden başlatılıyor: {e}")
