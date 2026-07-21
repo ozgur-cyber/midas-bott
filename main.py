@@ -28,7 +28,6 @@ from telegram.ext import (
     filters
 )
 
-# Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -36,7 +35,6 @@ logging.basicConfig(
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "TELEGRAM_BOT_TOKEN_BURAYA")
 
-# Flask Web Server (Render 7/24 Aktif Tutma)
 app = Flask(__name__)
 
 @app.route('/')
@@ -50,7 +48,6 @@ def keep_alive():
     t = Thread(target=run_web, daemon=True)
     t.start()
 
-# Format Yardımcıları
 def fmt(val, precision=4):
     if val is None:
         return "0"
@@ -64,7 +61,6 @@ def fmt_usd(val):
         return "$0.00"
     return f"${val:,.2f}"
 
-# TCMB Canlı USD Kuru Çekici
 def fetch_usd_rate() -> float:
     try:
         url = "https://www.tcmb.gov.tr/kurlar/today.xml"
@@ -88,7 +84,6 @@ def fetch_usd_rate() -> float:
     
     return 34.0
 
-# TEFAS Fon Fiyatı Çekici
 def fetch_price(symbol: str) -> float:
     symbol = symbol.upper().strip()
     try:
@@ -97,13 +92,12 @@ def fetch_price(symbol: str) -> float:
         res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             data = res.json()
-            if "price" in data:
+            if "price" in data and data["price"] is not None:
                 return float(data["price"])
     except Exception:
         pass
     return 0.0
 
-# Database Kurulumu ve Tablo Yapısı
 def init_db():
     conn = sqlite3.connect("portfolio.db")
     cursor = conn.cursor()
@@ -269,7 +263,8 @@ async def portfoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for symbol, amount, avg_cost in items:
         cur_price = fetch_price(symbol)
-        if cur_price <= 0: cur_price = avg_cost
+        if cur_price <= 0: 
+            cur_price = avg_cost # API fiyat vermezse maliyeti baz al
 
         cost_val = amount * avg_cost
         curr_val = amount * cur_price
@@ -627,17 +622,20 @@ async def ekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         symbol = context.args[0].upper()
         amount = float(context.args[1].replace(',', '.'))
         
+        # Maliyet ondalık ayracı akıllı düzeltme (örn: 3.402 veya 3,402 -> 3.402)
         raw_cost_str = context.args[2]
         if '.' in raw_cost_str and ',' in raw_cost_str:
             raw_cost_str = raw_cost_str.replace('.', '').replace(',', '.')
-        elif raw_cost_str.count('.') > 1:
-            raw_cost_str = raw_cost_str.replace('.', '')
-        elif '.' in raw_cost_str and len(raw_cost_str.split('.')[1]) > 2:
-            raw_cost_str = raw_cost_str.replace('.', '')
-        else:
-            raw_cost_str = raw_cost_str.replace(',', '.')
-
+        elif raw_cost_str.count('.') == 1 and len(raw_cost_str.split('.')[1]) == 3 and not raw_cost_str.startswith('0.'):
+            # Binlik nokta ayracı olarak girildiyse (örn: 3.402 -> 3402 veya 3.402 binlik değilse ondalık binlik düzeltmesi)
+            # Eğer kullanıcı 3.402 yazdıysa ve binyerine ondalıksa bunu 3.402 olarak alıyoruz. 
+            pass
+        
+        # Eğer kullanıcı standart ondalık yerine binlik nokta koyduysa (örn: 3.402 TL maliyet)
+        # Ondalık basamak hassasiyeti için noktayı ondalık yapıyoruz:
+        raw_cost_str = raw_cost_str.replace(',', '.')
         cost = float(raw_cost_str)
+        
         db_add_asset(user_id, symbol, amount, cost)
         await update.message.reply_text(f"✅ *{symbol}* eklendi!\nAdet: `{fmt(amount, 2)}` | Maliyet: `{fmt(cost, 4)} TL`", parse_mode="Markdown")
     except ValueError:
