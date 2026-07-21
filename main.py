@@ -31,7 +31,7 @@ from telegram.ext import (
 )
 
 # ---------------------------------------------------------------------------
-# LOGGING & FLASK KEEP-ALIVE SERVER
+# LOGGING & FLASK KEEP-ALIVE SERVER (RENDER 7/24)
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -50,7 +50,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # ---------------------------------------------------------------------------
-# VERİTABANI YÖNETİMİ
+# GELİŞMİŞ VERİTABANI YÖNETİMİ (SQLite)
 # ---------------------------------------------------------------------------
 DB_NAME = "midas_bot.db"
 
@@ -58,6 +58,8 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
+    
+    # Kullanıcılar Tablosu
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -66,6 +68,8 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    
+    # Portföy Tablosu
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,6 +79,30 @@ def init_db():
             maliyet REAL
         )
     ''')
+
+    # Takip Listesi Tablosu
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS watchlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            fon_kodu TEXT,
+            UNIQUE(user_id, fon_kodu)
+        )
+    ''')
+
+    # İşlem Geçmişi Tablosu
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            fon_kodu TEXT,
+            islem_tipi TEXT,
+            adet REAL,
+            fiyat REAL,
+            tarih TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
@@ -88,10 +116,44 @@ def add_user_to_db(user_id: int, username: str):
 def db_add_portfolio_item(user_id: int, fon_kodu: str, adet: float, maliyet: float):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO portfolio (user_id, fon_kodu, adet, maliyet) VALUES (?, ?, ?, ?)",
-                   (user_id, fon_kodu.upper(), adet, maliyet))
+    fon_kodu = fon_kodu.upper()
+    
+    # Mevcut kayıt var mı kontrol et
+    cursor.execute("SELECT id, adet, maliyet FROM portfolio WHERE user_id = ? AND fon_kodu = ?", (user_id, fon_kodu))
+    row = cursor.fetchone()
+    
+    if row:
+        yeni_adet = row[1] + adet
+        yeni_maliyet = ((row[1] * row[2]) + (adet * maliyet)) / yeni_adet
+        cursor.execute("UPDATE portfolio SET adet = ?, maliyet = ? WHERE id = ?", (yeni_adet, yeni_maliyet, row[0]))
+    else:
+        cursor.execute("INSERT INTO portfolio (user_id, fon_kodu, adet, maliyet) VALUES (?, ?, ?, ?)",
+                       (user_id, fon_kodu, adet, maliyet))
+    
+    # İşlem geçmişine kaydet
+    cursor.execute("INSERT INTO history (user_id, fon_kodu, islem_tipi, adet, fiyat) VALUES (?, ?, 'ALIS', ?, ?)",
+                   (user_id, fon_kodu, adet, maliyet))
+    
     conn.commit()
     conn.close()
+
+def db_remove_portfolio_item(user_id: int, fon_kodu: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    fon_kodu = fon_kodu.upper()
+    
+    cursor.execute("SELECT adet, maliyet FROM portfolio WHERE user_id = ? AND fon_kodu = ?", (user_id, fon_kodu))
+    row = cursor.fetchone()
+    
+    if row:
+        cursor.execute("DELETE FROM portfolio WHERE user_id = ? AND fon_kodu = ?", (user_id, fon_kodu))
+        cursor.execute("INSERT INTO history (user_id, fon_kodu, islem_tipi, adet, fiyat) VALUES (?, ?, 'SATIS', ?, ?)",
+                       (user_id, fon_kodu, row[0], row[1]))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
 
 def db_get_user_portfolio(user_id: int):
     conn = sqlite3.connect(DB_NAME)
@@ -116,6 +178,34 @@ def db_set_nakit(user_id: int, miktar: float):
     conn.commit()
     conn.close()
 
+def db_add_watchlist(user_id: int, fon_kodu: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO watchlist (user_id, fon_kodu) VALUES (?, ?)", (user_id, fon_kodu.upper()))
+        conn.commit()
+        res = True
+    except sqlite3.IntegrityError:
+        res = False
+    conn.close()
+    return res
+
+def db_get_watchlist(user_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT fon_kodu FROM watchlist WHERE user_id = ?", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def db_get_history(user_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT fon_kodu, islem_tipi, adet, fiyat, tarih FROM history WHERE user_id = ? ORDER BY tarih DESC LIMIT 10", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
 # ---------------------------------------------------------------------------
 # RESMİ TEFAS JSON API PARSER & TCMB KUR ENTEGRASYONU
 # ---------------------------------------------------------------------------
@@ -137,7 +227,6 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
     fon_kodu = fon_kodu.upper()
     url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
     
-    # Hafta sonu veya tatillere takılmamak için son 7 günlük pencere sorgulanır
     end_date = datetime.now()
     start_date = end_date - timedelta(days=7)
 
@@ -163,13 +252,10 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
             data_list = res_json.get("data", [])
 
             if data_list:
-                # En güncel kayıt listenin son elemanıdır
                 latest = data_list[-1]
-
                 fon_adi = latest.get("FONUNVAN", f"{fon_kodu} Yatırım Fonu")
                 fiyat_tl = float(latest.get("FIYAT", 0.0))
 
-                # Günlük değişim hesaplama
                 gunluk_getiri = "%0.00"
                 if len(data_list) >= 2:
                     prev_fiyat = float(data_list[-2].get("FIYAT", fiyat_tl))
@@ -187,16 +273,15 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
                     "fiyat_tl": fiyat_tl,
                     "fiyat_usd": fiyat_usd,
                     "gunluk_getiri": gunluk_getiri,
-                    "aylik_getiri": "%--",
                     "tarih": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
                 }
             else:
                 return {"success": False, "error": f"'{fon_kodu}' TEFAS veritabanında bulunamadı."}
         else:
-            return {"success": False, "error": f"TEFAS API Yanıt Vermedi (HTTP {response.status_code})"}
+            return {"success": False, "error": f"TEFAS Sunucu Hatası (HTTP {response.status_code})"}
     except Exception as e:
         logger.error(f"TEFAS API Hatası ({fon_kodu}): {e}")
-        return {"success": False, "error": "TEFAS bağlantı hatası."}
+        return {"success": False, "error": "Bağlantı sağlanamadı."}
 
 # ---------------------------------------------------------------------------
 # PORTFÖY ÖZETİ TASARIMI
@@ -246,12 +331,12 @@ def build_portfolio_summary_text(user_id: int) -> str:
     return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
-# GRAFİK MOTORU
+# GRAFİK VE PDF MOTORU
 # ---------------------------------------------------------------------------
 def generate_portfolio_pie_chart(portfolio_data: dict) -> io.BytesIO:
     labels = list(portfolio_data.keys())
     sizes = list(portfolio_data.values())
-    colors_list = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    colors_list = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2']
 
     fig, ax = plt.subplots(figsize=(6, 6))
     wedges, texts, autotexts = ax.pie(
@@ -262,7 +347,7 @@ def generate_portfolio_pie_chart(portfolio_data: dict) -> io.BytesIO:
         colors=colors_list[:len(labels)],
         textprops=dict(color="w", weight="bold")
     )
-    ax.legend(wedges, labels, title="Fonlar", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
+    ax.legend(wedges, labels, title="Varlıklar", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
     plt.setp(autotexts, size=9, weight="bold")
     plt.title("Portföy Varlık Dağılımı", fontsize=13, pad=15)
 
@@ -272,8 +357,70 @@ def generate_portfolio_pie_chart(portfolio_data: dict) -> io.BytesIO:
     plt.close(fig)
     return buf
 
+def generate_pdf_report(user_id: int, username: str) -> io.BytesIO:
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Başlık
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=18, textColor=colors.HexColor('#1A365D'))
+    story.append(Paragraph(f"Midas & TEFAS Portföy Raporu", title_style))
+    story.append(Paragraph(f"Müşteri/Kullanıcı: {username} | Tarih: {datetime.now().strftime('%d.%m.%Y %H:%M')}", styles['Normal']))
+    story.append(Spacer(1, 15))
+
+    # Tablo Verileri
+    rows = db_get_user_portfolio(user_id)
+    nakit_tl = db_get_nakit(user_id)
+    usd_rate = get_tcmb_usd_rate()
+
+    table_data = [["Fon Kodu", "Adet", "Ort. Maliyet", "Güncel Fiyat", "Toplam Değer (TL)", "K/Z (%)"]]
+    toplam_val = nakit_tl
+    toplam_mal = 0.0
+
+    for kod, adet, mal in rows:
+        data = fetch_tefas_data(kod)
+        g_fiyat = data.get("fiyat_tl", mal) if data.get("success") else mal
+        val = adet * g_fiyat
+        toplam_val += val
+        toplam_mal += (adet * mal)
+        kz_yuzde = ((g_fiyat - mal) / mal * 100) if mal > 0 else 0.0
+
+        table_data.append([
+            kod,
+            f"{adet:.2f}",
+            f"{mal:.4f} TL",
+            f"{g_fiyat:.4f} TL",
+            f"{val:.2f} TL",
+            f"%{kz_yuzde:+.2f}"
+        ])
+
+    table = Table(table_data)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2B6CB0')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 15))
+
+    toplam_kz_tl = (toplam_val - nakit_tl) - toplam_mal
+    summary_text = (
+        f"<b>Nakit TL:</b> {nakit_tl:.2f} TL<br/>"
+        f"<b>Toplam Portföy Değeri:</b> {toplam_val:.2f} TL (${toplam_val/usd_rate:.2f})<br/>"
+        f"<b>Toplam Kâr/Zarar:</b> {toplam_kz_tl:+.2f} TL"
+    )
+    story.append(Paragraph(summary_text, styles['Normal']))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
 # ---------------------------------------------------------------------------
-# BOT KOMUTLARI VE BUTON YÖNETİMİ
+# TELEGRAM BUTON KONTROLLERİ VE KOMUTLAR
 # ---------------------------------------------------------------------------
 def get_main_keyboard():
     keyboard = [
@@ -292,8 +439,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = (
         f"👋 Merhaba **{user.first_name}**!\n\n"
-        "**Midas & TEFAS Fon Takip Sistemine** hoş geldin.\n"
-        "Aşağıdaki menüyü kullanarak işlemlerini gerçekleştirebilirsin."
+        "**Midas & TEFAS Portföy Takip Sistemine** hoş geldin.\n"
+        "Aşağıdaki menü butonlarını kullanarak tüm işlemlerini anlık yönetebilirsin."
     )
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -323,6 +470,71 @@ async def fon_sorgu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ Veri alınamadı: {data.get('error')}")
 
+async def ekle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 3:
+        await update.message.reply_text("⚠️ Örnek kullanım:\n`/ekle TP2 100 2.084`", parse_mode="Markdown")
+        return
+
+    try:
+        fon_kodu = context.args[0].upper()
+        adet = float(context.args[1])
+        maliyet = float(context.args[2])
+        
+        db_add_portfolio_item(update.effective_user.id, fon_kodu, adet, maliyet)
+        await update.message.reply_text(f"✅ **{fon_kodu}** fonundan **{adet} adet** ({maliyet} TL maliyetle) portföyünüze eklendi.", parse_mode="Markdown")
+    except ValueError:
+        await update.message.reply_text("❌ Adet ve maliyet değerlerini sayısal girin.")
+
+async def sil_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ Örnek kullanım:\n`/sil TP2`", parse_mode="Markdown")
+        return
+
+    fon_kodu = context.args[0].upper()
+    res = db_remove_portfolio_item(update.effective_user.id, fon_kodu)
+    if res:
+        await update.message.reply_text(f"🗑️ **{fon_kodu}** fonu portföyünüzden silindi.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"❌ Portföyünüzde **{fon_kodu}** kodlu fon bulunamadı.", parse_mode="Markdown")
+
+async def nakit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        nakit = db_get_nakit(update.effective_user.id)
+        await update.message.reply_text(f"💵 **Mevcut Nakit:** {nakit:.2f} TL\nGüncellemek için: `/nakit 5000`", parse_mode="Markdown")
+        return
+
+    try:
+        miktar = float(context.args[0])
+        db_set_nakit(update.effective_user.id, miktar)
+        await update.message.reply_text(f"✅ Nakit bakiyeniz **{miktar:.2f} TL** olarak güncellendi.", parse_mode="Markdown")
+    except ValueError:
+        await update.message.reply_text("❌ Lütfen geçerli bir bakiye tutarı girin.")
+
+async def takip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        watchlist = db_get_watchlist(update.effective_user.id)
+        if not watchlist:
+            await update.message.reply_text("👀 Takip listenizde henüz fon bulunmuyor.\nEksik fon eklemek için: `/takip AAL`", parse_mode="Markdown")
+            return
+        
+        lines = ["👀 **TAKİP LİSTENİZDEKİ FONLAR**", "───────────────────────────"]
+        for kod in watchlist:
+            data = fetch_tefas_data(kod)
+            if data.get("success"):
+                lines.append(f"🔹 **{kod}**: {data['fiyat_tl']} TL ({data['gunluk_getiri']})")
+            else:
+                lines.append(f"🔹 **{kod}**: Veri alınamadı")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    fon_kodu = context.args[0].upper()
+    res = db_add_watchlist(update.effective_user.id, fon_kodu)
+    if res:
+        await update.message.reply_text(f"✅ **{fon_kodu}** takip listenize eklendi.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"ℹ️ **{fon_kodu}** zaten takip listenizde mevcut.", parse_mode="Markdown")
+
+# Metin Mesajı ve Alt Klavye Buton Yakalayıcı
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
@@ -340,6 +552,9 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         chart_buf = generate_portfolio_pie_chart(portfolio_dict)
         await update.message.reply_photo(photo=chart_buf, caption="📊 **Portföy Varlık Dağılımınız**", parse_mode="Markdown")
 
+    elif "Takip Listesi" in text:
+        await takip_command(update, context)
+
     elif "Nakit" in text:
         nakit = db_get_nakit(user_id)
         usd = nakit / get_tcmb_usd_rate()
@@ -352,25 +567,44 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("➕ Fon eklemek için: `/ekle <KOD> <ADET> <MALİYET>`\nÖrnek: `/ekle TP2 100 2.084`", parse_mode="Markdown")
 
     elif "Fon Sil" in text:
-        await update.message.reply_text("🗑️ Fon silmek için: `/sil <KOD>`", parse_mode="Markdown")
+        await update.message.reply_text("🗑️ Fon silmek için: `/sil <KOD>` (Örn: `/sil TP2`)", parse_mode="Markdown")
+
+    elif "Geçmiş" in text:
+        history = db_get_history(user_id)
+        if not history:
+            await update.message.reply_text("📜 Henüz kaydedilmiş bir işlem geçmişiniz yok.")
+            return
+        lines = ["📜 **SON 10 İŞLEM GEÇMİŞİNİZ**", "───────────────────────────"]
+        for kod, tip, adet, fiyat, tarih in history:
+            emoji = "🟢" if tip == "ALIS" else "🔴"
+            lines.append(f"{emoji} **{tip}** - {kod}: {adet} Adet @ {fiyat} TL ({tarih})")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    elif "PDF Raporu" in text:
+        await update.message.reply_text("📄 PDF raporunuz hazırlanıyor, lütfen bekleyin...")
+        pdf_buf = generate_pdf_report(user_id, update.effective_user.first_name)
+        await update.message.reply_document(document=pdf_buf, filename="Portfoy_Raporu.pdf", caption="📄 **Anlık Portföy Raporunuz**")
+
+    elif "Ort. Performans" in text:
+        rows = db_get_user_portfolio(user_id)
+        if not rows:
+            await update.message.reply_text("ℹ️ Performans hesabı için portföyünüzde fon bulunmalıdır.")
+            return
+        toplam_kar = 0.0
+        toplam_mal = 0.0
+        for kod, adet, mal in rows:
+            data = fetch_tefas_data(kod)
+            g_fiyat = data.get("fiyat_tl", mal) if data.get("success") else mal
+            toplam_kar += (adet * g_fiyat)
+            toplam_mal += (adet * mal)
+        genel_getiri = ((toplam_kar - toplam_mal) / toplam_mal * 100) if toplam_mal > 0 else 0.0
+        await update.message.reply_text(f"📈 **Portföy Ortalama Performansı:** %{genel_getiri:+.2f}", parse_mode="Markdown")
+
+    elif "Ayarlar" in text:
+        await update.message.reply_text("⚙️ **Sistem Ayarları:**\n\n• Veritabanı: SQLite (Aktif)\n• Sunucu: Render Keep-Alive (Aktif)\n• TEFAS API Entegrasyonu: Aktif", parse_mode="Markdown")
 
     else:
-        await update.message.reply_text("ℹ️ Komut anlaşılamadı. Menü tuşlarını kullanabilirsiniz.", reply_markup=get_main_keyboard())
-
-async def ekle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 3:
-        await update.message.reply_text("⚠️ Örnek kullanım:\n`/ekle TP2 100 2.084`", parse_mode="Markdown")
-        return
-
-    try:
-        fon_kodu = context.args[0].upper()
-        adet = float(context.args[1])
-        maliyet = float(context.args[2])
-        
-        db_add_portfolio_item(update.effective_user.id, fon_kodu, adet, maliyet)
-        await update.message.reply_text(f"✅ **{fon_kodu}** fonundan **{adet} adet** ({maliyet} TL maliyetle) portföyünüze eklendi.", parse_mode="Markdown")
-    except ValueError:
-        await update.message.reply_text("❌ Adet ve maliyet değerlerini sayısal girin.")
+        await update.message.reply_text("ℹ️ Komut anlaşılamadı. Lütfen menüdeki butonları kullanın.", reply_markup=get_main_keyboard())
 
 # ---------------------------------------------------------------------------
 # ANA UYGULAMA BAŞLATICI
@@ -393,9 +627,13 @@ def main():
     bot_app.add_handler(CommandHandler("portfoy", portfoy_command))
     bot_app.add_handler(CommandHandler("fon", fon_sorgu))
     bot_app.add_handler(CommandHandler("ekle", ekle_command))
+    bot_app.add_handler(CommandHandler("sil", sil_command))
+    bot_app.add_handler(CommandHandler("nakit", nakit_command))
+    bot_app.add_handler(CommandHandler("takip", takip_command))
+    
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
-    logger.info("Midas & TEFAS Botu başlatılıyor...")
+    logger.info("Midas & TEFAS Botu tüm modülleriyle başlatılıyor...")
     bot_app.run_polling(stop_signals=None)
 
 if __name__ == "__main__":
