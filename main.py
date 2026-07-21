@@ -59,7 +59,6 @@ def init_db():
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
     
-    # Kullanıcılar Tablosu
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -69,7 +68,6 @@ def init_db():
         )
     ''')
     
-    # Portföy Tablosu
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,7 +78,6 @@ def init_db():
         )
     ''')
 
-    # Takip Listesi Tablosu
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS watchlist (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,7 +87,6 @@ def init_db():
         )
     ''')
 
-    # İşlem Geçmişi Tablosu
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,7 +114,6 @@ def db_add_portfolio_item(user_id: int, fon_kodu: str, adet: float, maliyet: flo
     cursor = conn.cursor()
     fon_kodu = fon_kodu.upper()
     
-    # Mevcut kayıt var mı kontrol et
     cursor.execute("SELECT id, adet, maliyet FROM portfolio WHERE user_id = ? AND fon_kodu = ?", (user_id, fon_kodu))
     row = cursor.fetchone()
     
@@ -130,7 +125,6 @@ def db_add_portfolio_item(user_id: int, fon_kodu: str, adet: float, maliyet: flo
         cursor.execute("INSERT INTO portfolio (user_id, fon_kodu, adet, maliyet) VALUES (?, ?, ?, ?)",
                        (user_id, fon_kodu, adet, maliyet))
     
-    # İşlem geçmişine kaydet
     cursor.execute("INSERT INTO history (user_id, fon_kodu, islem_tipi, adet, fiyat) VALUES (?, ?, 'ALIS', ?, ?)",
                    (user_id, fon_kodu, adet, maliyet))
     
@@ -207,7 +201,7 @@ def db_get_history(user_id: int):
     return rows
 
 # ---------------------------------------------------------------------------
-# RESMİ TEFAS JSON API PARSER & TCMB KUR ENTEGRASYONU
+# TCMB DÖVİZ KURU VE ÇİFT KATMANLI TEFAS VERİ ÇEKİCİ
 # ---------------------------------------------------------------------------
 def get_tcmb_usd_rate() -> float:
     url = "https://www.tcmb.gov.tr/kurlar/today.xml"
@@ -224,9 +218,50 @@ def get_tcmb_usd_rate() -> float:
     return 34.50
 
 def fetch_tefas_data(fon_kodu: str) -> dict:
-    fon_kodu = fon_kodu.upper()
-    url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
+    fon_kodu = fon_kodu.upper().strip()
     
+    # 1. YÖNTEM: TEFAS FonAnaliz Sayfası Scraping (HTTP 404 ve Ban Önleme)
+    web_url = f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={fon_kodu}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "https://www.tefas.gov.tr/"
+    }
+
+    try:
+        response = async_requests.get(web_url, headers=headers, impersonate="chrome", timeout=12)
+        if response.status_code == 200:
+            html = response.text
+            
+            price_match = re.search(r'id="MainContent_m_lblFiyat">([^<]+)<', html)
+            title_match = re.search(r'id="MainContent_m_lblFonUnvan">([^<]+)<', html)
+            getiri_match = re.search(r'id="MainContent_m_lblGunlukGetiri">([^<]+)<', html)
+
+            if price_match:
+                fon_adi = title_match.group(1).strip() if title_match else f"{fon_kodu} Yatırım Fonu"
+                raw_price = price_match.group(1).replace(",", ".").strip()
+                fiyat_tl = float(raw_price)
+                
+                gunluk_getiri = getiri_match.group(1).strip() if getiri_match else "%0.00"
+                if not any(gunluk_getiri.startswith(x) for x in ["%", "+", "-"]):
+                    gunluk_getiri = f"%{gunluk_getiri}"
+
+                usd_rate = get_tcmb_usd_rate()
+                fiyat_usd = round(fiyat_tl / usd_rate, 4) if usd_rate > 0 else 0.0
+
+                return {
+                    "success": True,
+                    "fon_kodu": fon_kodu,
+                    "fon_adi": fon_adi,
+                    "fiyat_tl": fiyat_tl,
+                    "fiyat_usd": fiyat_usd,
+                    "gunluk_getiri": gunluk_getiri,
+                    "tarih": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                }
+    except Exception as e:
+        logger.error(f"TEFAS Web Scraping Hatası ({fon_kodu}): {e}")
+
+    # 2. YÖNTEM: TEFAS JSON API (Yedek Katman)
+    api_url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
     end_date = datetime.now()
     start_date = end_date - timedelta(days=7)
 
@@ -238,19 +273,18 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
         "fonkod": fon_kodu
     }
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    api_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "X-Requested-With": "XMLHttpRequest",
         "Origin": "https://www.tefas.gov.tr",
         "Referer": "https://www.tefas.gov.tr/FonAnaliz.aspx"
     }
 
     try:
-        response = async_requests.post(url, data=payload, headers=headers, impersonate="chrome", timeout=15)
-        if response.status_code == 200:
-            res_json = response.json()
+        res = async_requests.post(api_url, data=payload, headers=api_headers, impersonate="chrome", timeout=12)
+        if res.status_code == 200:
+            res_json = res.json()
             data_list = res_json.get("data", [])
-
             if data_list:
                 latest = data_list[-1]
                 fon_adi = latest.get("FONUNVAN", f"{fon_kodu} Yatırım Fonu")
@@ -264,7 +298,7 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
                         gunluk_getiri = f"%{change:+.2f}"
 
                 usd_rate = get_tcmb_usd_rate()
-                fiyat_usd = round(fiyat_tl / usd_rate, 6) if usd_rate > 0 else 0.0
+                fiyat_usd = round(fiyat_tl / usd_rate, 4) if usd_rate > 0 else 0.0
 
                 return {
                     "success": True,
@@ -275,13 +309,10 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
                     "gunluk_getiri": gunluk_getiri,
                     "tarih": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
                 }
-            else:
-                return {"success": False, "error": f"'{fon_kodu}' TEFAS veritabanında bulunamadı."}
-        else:
-            return {"success": False, "error": f"TEFAS Sunucu Hatası (HTTP {response.status_code})"}
     except Exception as e:
         logger.error(f"TEFAS API Hatası ({fon_kodu}): {e}")
-        return {"success": False, "error": "Bağlantı sağlanamadı."}
+
+    return {"success": False, "error": f"'{fon_kodu}' TEFAS veritabanında bulunamadı veya sunucu yanıt vermiyor."}
 
 # ---------------------------------------------------------------------------
 # PORTFÖY ÖZETİ TASARIMI
@@ -363,13 +394,11 @@ def generate_pdf_report(user_id: int, username: str) -> io.BytesIO:
     styles = getSampleStyleSheet()
     story = []
 
-    # Başlık
     title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=18, textColor=colors.HexColor('#1A365D'))
     story.append(Paragraph(f"Midas & TEFAS Portföy Raporu", title_style))
     story.append(Paragraph(f"Müşteri/Kullanıcı: {username} | Tarih: {datetime.now().strftime('%d.%m.%Y %H:%M')}", styles['Normal']))
     story.append(Spacer(1, 15))
 
-    # Tablo Verileri
     rows = db_get_user_portfolio(user_id)
     nakit_tl = db_get_nakit(user_id)
     usd_rate = get_tcmb_usd_rate()
@@ -450,7 +479,7 @@ async def portfoy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def fon_sorgu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ Lütfen sorgulamak istediğiniz fon kodunu yazın.\nÖrnek: `/fon TP2`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Lütfen sorgulamak istediğiniz fon kodunu yazın.\nÖrnek: `/fon AAL`", parse_mode="Markdown")
         return
 
     fon_kodu = context.args[0].upper()
@@ -472,7 +501,7 @@ async def fon_sorgu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ekle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 3:
-        await update.message.reply_text("⚠️ Örnek kullanım:\n`/ekle TP2 100 2.084`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Örnek kullanım:\n`/ekle AAL 10 3.402`", parse_mode="Markdown")
         return
 
     try:
@@ -487,7 +516,7 @@ async def ekle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def sil_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ Örnek kullanım:\n`/sil TP2`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Örnek kullanım:\n`/sil AAL`", parse_mode="Markdown")
         return
 
     fon_kodu = context.args[0].upper()
@@ -534,7 +563,6 @@ async def takip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"ℹ️ **{fon_kodu}** zaten takip listenizde mevcut.", parse_mode="Markdown")
 
-# Metin Mesajı ve Alt Klavye Buton Yakalayıcı
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
@@ -561,13 +589,13 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"💵 **Mevcut Nakit:** {nakit:.2f} TL (${usd:.2f})\n\nGüncellemek için: `/nakit <MIKTAR>`", parse_mode="Markdown")
 
     elif "Fon Ara" in text:
-        await update.message.reply_text("🔍 Fon aramak için: `/fon <KOD>` (Örn: `/fon TP2`)", parse_mode="Markdown")
+        await update.message.reply_text("🔍 Fon aramak için: `/fon <KOD>` (Örn: `/fon AAL`)", parse_mode="Markdown")
 
     elif "Fon Ekle" in text:
-        await update.message.reply_text("➕ Fon eklemek için: `/ekle <KOD> <ADET> <MALİYET>`\nÖrnek: `/ekle TP2 100 2.084`", parse_mode="Markdown")
+        await update.message.reply_text("➕ Fon eklemek için: `/ekle <KOD> <ADET> <MALİYET>`\nÖrnek: `/ekle AAL 10 3.402`", parse_mode="Markdown")
 
     elif "Fon Sil" in text:
-        await update.message.reply_text("🗑️ Fon silmek için: `/sil <KOD>` (Örn: `/sil TP2`)", parse_mode="Markdown")
+        await update.message.reply_text("🗑️ Fon silmek için: `/sil <KOD>` (Örn: `/sil AAL`)", parse_mode="Markdown")
 
     elif "Geçmiş" in text:
         history = db_get_history(user_id)
@@ -601,13 +629,13 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"📈 **Portföy Ortalama Performansı:** %{genel_getiri:+.2f}", parse_mode="Markdown")
 
     elif "Ayarlar" in text:
-        await update.message.reply_text("⚙️ **Sistem Ayarları:**\n\n• Veritabanı: SQLite (Aktif)\n• Sunucu: Render Keep-Alive (Aktif)\n• TEFAS API Entegrasyonu: Aktif", parse_mode="Markdown")
+        await update.message.reply_text("⚙️ **Sistem Ayarları:**\n\n• Veritabanı: SQLite (Aktif)\n• Sunucu: Render Keep-Alive (Aktif)\n• TEFAS Entegrasyonu: Canlı Web Scraping + API Fallback (Aktif)", parse_mode="Markdown")
 
     else:
         await update.message.reply_text("ℹ️ Komut anlaşılamadı. Lütfen menüdeki butonları kullanın.", reply_markup=get_main_keyboard())
 
 # ---------------------------------------------------------------------------
-# ANA UYGULAMA BAŞLATICI
+# UYGULAMA BAŞLATICI
 # ---------------------------------------------------------------------------
 def main():
     token = os.environ.get("BOT_TOKEN")
@@ -617,10 +645,8 @@ def main():
 
     init_db()
 
-    # Flask Sunucusunu Arka Planda Başlat
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Telegram Bot Yapılandırması
     bot_app = ApplicationBuilder().token(token).build()
 
     bot_app.add_handler(CommandHandler("start", start))
