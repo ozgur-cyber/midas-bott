@@ -117,7 +117,7 @@ def db_set_nakit(user_id: int, miktar: float):
     conn.close()
 
 # ---------------------------------------------------------------------------
-# CANLI TEFAS & TCMB CANLI VERİ PARSERI
+# GELİŞMİŞ TEFAS & TCMB PARSER
 # ---------------------------------------------------------------------------
 def get_tcmb_usd_rate() -> float:
     url = "https://www.tcmb.gov.tr/kurlar/today.xml"
@@ -146,15 +146,17 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
         if response.status_code == 200:
             html = response.text
 
-            # 1. Fon Adı Parse
+            # 1. Fon Adı Parse (MainContent_LabelFonAd)
             fon_adi = f"{fon_kodu} Yatırım Fonu"
-            match_adi = re.search(r'id="MainContent_LabelFonAd">([^<]+)<', html)
+            match_adi = re.search(r'id="MainContent_LabelFonAd"[^>]*>([^<]+)<', html, re.IGNORECASE)
             if match_adi:
                 fon_adi = match_adi.group(1).strip()
 
-            # 2. Gerçek Canlı Fiyat Parse (Örn: 2,084848)
+            # 2. Canlı Fiyat Parse (MainContent_LabelFiyat)
             fiyat_tl = None
-            match_fiyat = re.search(r'Son Fiyat\s*\(TL\)\s*</span>\s*<span>\s*([\d\.,]+)\s*</span>', html, re.IGNORECASE)
+            match_fiyat = re.search(r'id="MainContent_LabelFiyat"[^>]*>([\d\.,]+)<', html, re.IGNORECASE)
+            if not match_fiyat:
+                match_fiyat = re.search(r'Son Fiyat\s*\(TL\)[^<]*</span>\s*<span>\s*([\d\.,]+)\s*</span>', html, re.IGNORECASE)
             if not match_fiyat:
                 match_fiyat = re.search(r'<span>([\d\.,]+)</span>\s*<span[^>]*>Son Fiyat', html, re.IGNORECASE)
 
@@ -166,7 +168,9 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
 
             # 3. Günlük Getiri Parse
             gunluk_getiri = "%0.00"
-            match_gunluk = re.search(r'Günlük Getiri\s*\(%\)\s*</span>\s*<span>\s*([^<]+)\s*</span>', html, re.IGNORECASE)
+            match_gunluk = re.search(r'id="MainContent_LabelGunlukGetiri"[^>]*>([^<]+)<', html, re.IGNORECASE)
+            if not match_gunluk:
+                match_gunluk = re.search(r'Günlük Getiri\s*\(%\)[^<]*</span>\s*<span>\s*([^<]+)\s*</span>', html, re.IGNORECASE)
             if match_gunluk:
                 gunluk_getiri = match_gunluk.group(1).strip()
                 if not gunluk_getiri.startswith("%"):
@@ -174,7 +178,9 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
 
             # 4. Aylık Getiri Parse
             aylik_getiri = "%0.00"
-            match_aylik = re.search(r'1 Ay\s*\(%\)\s*</span>\s*<span>\s*([^<]+)\s*</span>', html, re.IGNORECASE)
+            match_aylik = re.search(r'id="MainContent_LabelAylikGetiri"[^>]*>([^<]+)<', html, re.IGNORECASE)
+            if not match_aylik:
+                match_aylik = re.search(r'1 Ay\s*\(%\)[^<]*</span>\s*<span>\s*([^<]+)\s*</span>', html, re.IGNORECASE)
             if match_aylik:
                 aylik_getiri = match_aylik.group(1).strip()
                 if not aylik_getiri.startswith("%"):
@@ -247,7 +253,7 @@ def build_portfolio_summary_text(user_id: int) -> str:
     return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
-# GRAFİK VE PDF MOTORU
+# GRAFİK MOTORU
 # ---------------------------------------------------------------------------
 def generate_portfolio_pie_chart(portfolio_data: dict) -> io.BytesIO:
     labels = list(portfolio_data.keys())
@@ -304,7 +310,7 @@ async def portfoy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def fon_sorgu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ Lütfen sorgulamak istediğiniz fon kodunu yazın.\nÖrnek: `/fon TP2`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Lütfen sorgulamak istediğiniz fon kodunu yazın.\nÖrnek: `/fon AAL`", parse_mode="Markdown")
         return
 
     fon_kodu = context.args[0].upper()
@@ -348,10 +354,10 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"💵 **Mevcut Nakit:** {nakit:.2f} TL (${usd:.2f})\n\nGüncellemek için: `/nakit <MIKTAR>`", parse_mode="Markdown")
 
     elif "Fon Ara" in text:
-        await update.message.reply_text("🔍 Fon aramak için: `/fon <KOD>` (Örn: `/fon TP2`)", parse_mode="Markdown")
+        await update.message.reply_text("🔍 Fon aramak için: `/fon <KOD>` (Örn: `/fon AAL`)", parse_mode="Markdown")
 
     elif "Fon Ekle" in text:
-        await update.message.reply_text("➕ Fon eklemek için: `/ekle <KOD> <ADET> <MALİYET>`\nÖrnek: `/ekle TP2 100 2.084`", parse_mode="Markdown")
+        await update.message.reply_text("➕ Fon eklemek için: `/ekle <KOD> <ADET> <MALİYET>`\nÖrnek: `/ekle AAL 10 3.402`", parse_mode="Markdown")
 
     elif "Fon Sil" in text:
         await update.message.reply_text("🗑️ Fon silmek için: `/sil <KOD>`", parse_mode="Markdown")
@@ -361,7 +367,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def ekle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 3:
-        await update.message.reply_text("⚠️ Örnek kullanım:\n`/ekle TP2 100 2.084`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Örnek kullanım:\n`/ekle AAL 10 3.402`", parse_mode="Markdown")
         return
 
     try:
