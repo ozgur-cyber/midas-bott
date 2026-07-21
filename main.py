@@ -36,7 +36,7 @@ logging.basicConfig(
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "TELEGRAM_BOT_TOKEN_BURAYA")
 
-# Flask Web Server (7/24 Aktif Tutma)
+# Flask Web Server (Render 7/24 Aktif Tutma)
 app = Flask(__name__)
 
 @app.route('/')
@@ -171,7 +171,7 @@ def get_user_settings(user_id: int):
         return {"hide": bool(row[0]), "currency": row[1], "notify": bool(row[2])}
     return {"hide": False, "currency": "BOTH", "notify": True}
 
-# Dinamik Ana Menü
+# Dinamik Ana Menü Klavyesi
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         [
@@ -244,18 +244,18 @@ def db_update_cash(user_id: int, delta: float, is_set: bool = False):
     conn.close()
     return new_bal
 
-# --- BOT KOMUTLARI & YÖNETİCİLERİ ---
+# --- BOT KOMUTLARI & HANDLERLARI ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     msg = (
         "📊 *Midas & TEFAS Portföy Takip Botu*\n\n"
-        "Aşağıdaki menü butonlarını kullanarak tüm işlemlerinizi yapabilirsiniz.\n"
-        "🔹 Hızlı Fon Ekleme: `/ekle <sembol> <adet> <maliyet>`\n"
-        "🔹 Hızlı Fon Silme: `/sil <sembol>`"
+        "Menüyü kullanarak işlemlerinizi yapabilirsiniz.\n"
+        "🔹 Fon Ekleme: `/ekle <sembol> <adet> <maliyet>`\n"
+        "🔹 Fon Silme: `/sil <sembol>`"
     )
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
+# Sadeleştirilmiş ve Kısa Portföy Özeti
 async def portfoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     items = db_get_portfolio(user_id)
@@ -267,10 +267,10 @@ async def portfoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     curr_pref = settings["currency"]
 
     if not items and cash_bal <= 0:
-        await update.message.reply_text("📭 Portföyünüz boş. `/ekle` veya **💵 Nakit** butonu ile varlık ekleyebilirsiniz.", reply_markup=get_main_keyboard())
+        await update.message.reply_text("📭 Portföyünüz boş.", reply_markup=get_main_keyboard())
         return
 
-    text = f"💼 *PORTFÖY ÖZETİ* (💱 1 USD = {usd_rate:.2f} TL)\n"
+    text = f"💼 *PORTFÖY ÖZETİ* (1 $ = {usd_rate:.2f} TL)\n"
     text += "───────────────────────────\n"
     total_cost_tl = 0.0
     total_value_tl = 0.0
@@ -287,58 +287,44 @@ async def portfoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_cost_tl += cost_val
         total_value_tl += curr_val
 
-        pnl_str = f"+%{pnl_pct:.2f}" if pnl >= 0 else f"-%{abs(pnl_pct):.2f}"
         icon = "🟢" if pnl >= 0 else "🔴"
+        pnl_str = f"+%{pnl_pct:.2f}" if pnl >= 0 else f"-%{abs(pnl_pct):.2f}"
 
-        text += f"🔹 *{symbol}*\n"
         if hidden:
-            text += f"   Adet: `***` | Maliyet: `***` | Değer: `***`\n"
+            text += f"🔹 *{symbol}*: `***`\n"
         else:
             if curr_pref == "TL":
-                text += f"   Adet: `{fmt(amount, 2)}` | Maliyet: `{fmt(avg_cost, 4)} TL`\n"
-                text += f"   Güncel: `{fmt(cur_price, 4)} TL` | Değer: `{fmt(curr_val, 2)} TL`\n"
-                text += f"   Durum: {icon} `{fmt(pnl, 2)} TL` ({pnl_str})\n"
+                text += f"🔹 *{symbol}*: `{fmt(curr_val, 2)} TL` ({icon} `{pnl_str}`)\n"
             elif curr_pref == "USD":
-                text += f"   Adet: `{fmt(amount, 2)}` | Maliyet: `{fmt_usd(avg_cost/usd_rate)}`\n"
-                text += f"   Güncel: `{fmt_usd(cur_price/usd_rate)}` | Değer: `{fmt_usd(curr_val/usd_rate)}`\n"
-                text += f"   Durum: {icon} `{fmt_usd(pnl/usd_rate)}` ({pnl_str})\n"
+                text += f"🔹 *{symbol}*: `{fmt_usd(curr_val/usd_rate)}` ({icon} `{pnl_str}`)\n"
             else: # BOTH
-                text += f"   Adet: `{fmt(amount, 2)}` | Ort. Maliyet: `{fmt(avg_cost, 4)} TL` (`{fmt_usd(avg_cost/usd_rate)}`)\n"
-                text += f"   Güncel: `{fmt(cur_price, 4)} TL` | Değer: `{fmt(curr_val, 2)} TL` (`{fmt_usd(curr_val/usd_rate)}`)\n"
-                text += f"   Durum: {icon} `{fmt(pnl, 2)} TL` / `{fmt_usd(pnl/usd_rate)}` ({pnl_str})\n"
-        text += "───────────────────────────\n"
+                text += f"🔹 *{symbol}*: `{fmt(curr_val, 2)} TL` | `{fmt_usd(curr_val/usd_rate)}` ({icon} `{pnl_str}`)\n"
 
+    text += "───────────────────────────\n"
     total_val_with_cash_tl = total_value_tl + cash_bal
     total_pnl_tl = total_value_tl - total_cost_tl
     total_pnl_pct = (total_pnl_tl / total_cost_tl * 100) if total_cost_tl > 0 else 0.0
     total_icon = "🚀" if total_pnl_tl >= 0 else "🔻"
 
     if hidden:
-        text += f"💵 *Nakit Bakiye:* `***`\n"
-        text += f"📈 *Genel Portföy Bakiye:* `***`\n"
+        text += f"📊 *Toplam:* `***`\n"
     else:
         if curr_pref == "TL":
-            text += f"💵 *Nakit Bakiye:* `{fmt(cash_bal, 2)} TL`\n"
-            text += f"💰 *Toplam Fon Maliyeti:* `{fmt(total_cost_tl, 2)} TL`\n"
-            text += f"📈 *Toplam Fon Değeri:* `{fmt(total_value_tl, 2)} TL`\n"
-            text += f"📊 *Genel Portföy Bakiye:* `{fmt(total_val_with_cash_tl, 2)} TL`\n"
-            text += f"{total_icon} *Toplam Kar/Zarar:* `{fmt(total_pnl_tl, 2)} TL` (%{total_pnl_pct:.2f})\n"
+            text += f"💵 *Nakit:* `{fmt(cash_bal, 2)} TL`\n"
+            text += f"📊 *Toplam Portföy:* `{fmt(total_val_with_cash_tl, 2)} TL`\n"
+            text += f"{total_icon} *K/Z:* `{fmt(total_pnl_tl, 2)} TL` (%{total_pnl_pct:.2f})\n"
         elif curr_pref == "USD":
-            text += f"💵 *Nakit Bakiye:* `{fmt_usd(cash_bal/usd_rate)}`\n"
-            text += f"💰 *Toplam Fon Maliyeti:* `{fmt_usd(total_cost_tl/usd_rate)}`\n"
-            text += f"📈 *Toplam Fon Değeri:* `{fmt_usd(total_value_tl/usd_rate)}`\n"
-            text += f"📊 *Genel Portföy Bakiye:* `{fmt_usd(total_val_with_cash_tl/usd_rate)}`\n"
-            text += f"{total_icon} *Toplam Kar/Zarar:* `{fmt_usd(total_pnl_tl/usd_rate)}` (%{total_pnl_pct:.2f})\n"
+            text += f"💵 *Nakit:* `{fmt_usd(cash_bal/usd_rate)}`\n"
+            text += f"📊 *Toplam Portföy:* `{fmt_usd(total_val_with_cash_tl/usd_rate)}`\n"
+            text += f"{total_icon} *K/Z:* `{fmt_usd(total_pnl_tl/usd_rate)}` (%{total_pnl_pct:.2f})\n"
         else: # BOTH
-            text += f"💵 *Nakit Bakiye:* `{fmt(cash_bal, 2)} TL` (`{fmt_usd(cash_bal/usd_rate)}`)\n"
-            text += f"💰 *Toplam Fon Maliyeti:* `{fmt(total_cost_tl, 2)} TL` (`{fmt_usd(total_cost_tl/usd_rate)}`)\n"
-            text += f"📈 *Toplam Fon Değeri:* `{fmt(total_value_tl, 2)} TL` (`{fmt_usd(total_value_tl/usd_rate)}`)\n"
-            text += f"📊 *Genel Portföy Bakiye:* `{fmt(total_val_with_cash_tl, 2)} TL` (`{fmt_usd(total_val_with_cash_tl/usd_rate)}`)\n"
-            text += f"{total_icon} *Toplam Kar/Zarar:* `{fmt(total_pnl_tl, 2)} TL` / `{fmt_usd(total_pnl_tl/usd_rate)}` (%{total_pnl_pct:.2f})\n"
+            text += f"💵 *Nakit:* `{fmt(cash_bal, 2)} TL` (`{fmt_usd(cash_bal/usd_rate)}`)\n"
+            text += f"📊 *Toplam Portföy:* `{fmt(total_val_with_cash_tl, 2)} TL` (`{fmt_usd(total_val_with_cash_tl/usd_rate)}`)\n"
+            text += f"{total_icon} *K/Z:* `{fmt(total_pnl_tl, 2)} TL` / `{fmt_usd(total_pnl_tl/usd_rate)}` (%{total_pnl_pct:.2f})\n"
 
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# --- AYARLAR MENÜSÜ & INLINE İŞLEMLERİ ---
+# --- AYARLAR MENÜSÜ & CALLBACK'LER ---
 async def ayarlar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     settings = get_user_settings(user_id)
@@ -352,7 +338,7 @@ async def ayarlar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔹 *Para Birimi Gösterimi:* `{curr_str}`\n"
         f"🔹 *Bakiye Tutarları:* `{hide_str}`\n"
         f"🔹 *Fiyat Artış Bildirimleri:* `{notify_str}`\n\n"
-        "Aşağıdaki butonları kullanarak ayarlarınızı anlık değiştirebilirsiniz:"
+        "Değiştirmek istediğiniz seçeneğe tıklayın:"
     )
 
     keyboard = [
@@ -407,7 +393,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await ayarlar_menu(update, context)
 
-# --- DİĞER FONKSİYONLAR ---
+# --- DİĞER MODÜLLER ---
 async def grafik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     items = db_get_portfolio(user_id)
@@ -451,8 +437,8 @@ async def nakit_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💵 *NAKİT PORTFÖYÜ*\n\n"
         f"Mevcut Nakit Bakiyeniz: `{bal_str}`\n\n"
         f"💡 *Nakit Güncelleme Komutları:*\n"
-        f"🔹 Nakit Ekle: `/nakitekle <tutar>` (Örn: `/nakitekle 5000`)\n"
-        f"🔹 Nakit Çıkar: `/nakitcikar <tutar>` (Örn: `/nakitcikar 1500`)"
+        f"🔹 Nakit Ekle: `/nakitekle <tutar>`\n"
+        f"🔹 Nakit Çıkar: `/nakitcikar <tutar>`"
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -517,7 +503,6 @@ async def ort_performans_view(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"🔻 *En Düşük Getiri:* `{worst_symbol}` (%{worst_pct:.2f})\n"
         f"📊 *Ağırlıklı Ortalama Getiri:* %{weighted_return:.2f}\n"
         f"───────────────────────────\n"
-        f"💡 Performans hesaplaması mevcut canlı fon fiyatlarına göre yapılır."
     )
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -533,8 +518,8 @@ async def takip_listesi_view(update: Update, context: ContextTypes.DEFAULT_TYPE)
         msg = (
             "👀 *TAKİP LİSTESİ*\n\n"
             "Takip listeniz boş.\n"
-            "🔹 Fon Takip Etmek İçin: `/takip <sembol>` (Örn: `/takip TI2`)\n"
-            "🔹 Takipten Çıkarmak İçin: `/takipsil <sembol>`"
+            "🔹 Ekleme: `/takip <sembol>` (Örn: `/takip TI2`)\n"
+            "🔹 Silme: `/takipsil <sembol>`"
         )
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
         return
@@ -543,7 +528,7 @@ async def takip_listesi_view(update: Update, context: ContextTypes.DEFAULT_TYPE)
     for (sym,) in rows:
         price = fetch_price(sym)
         msg += f"🔹 *{sym}*: `{fmt(price, 6)} TL`\n"
-    msg += "───────────────────────────\n💡 `/takip <sembol>` veya `/takipsil <sembol>` yazarak yönetebilirsiniz."
+    msg += "───────────────────────────\n💡 `/takip <sembol>` veya `/takipsil <sembol>` yazabilirsiniz."
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 async def takip_ekle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -585,7 +570,7 @@ async def fon_ara_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if price > 0:
         await update.message.reply_text(f"🔍 *{sym} Fon Fiyatı:*\n💵 TL Fiyat: `{fmt(price, 6)} TL`\n💲 USD Fiyat: `{fmt_usd(price/usd_rate)}`", parse_mode="Markdown")
     else:
-        await update.message.reply_text(f"⚠️ *{sym}* için fiyat bilgisi alınamadı veya kod hatalı.", parse_mode="Markdown")
+        await update.message.reply_text(f"⚠️ *{sym}* için fiyat bilgisi alınamadı.", parse_mode="Markdown")
 
 async def gecmis_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -646,15 +631,15 @@ async def pdf_raporu_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(
         document=buf,
         filename="Portfoy_Raporu.pdf",
-        caption="📄 Detaylı TL ve USD Destekli PDF Raporunuz Hazırlandı.",
+        caption="📄 Detaylı PDF Raporunuz Hazırlandı.",
         reply_markup=get_main_keyboard()
     )
 
 async def fon_ekle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("➕ Fon eklemek için şu formatta yazın:\n`/ekle <sembol> <adet> <maliyet>`\n\nÖrnek: `/ekle TP2 1000 2.15`", parse_mode="Markdown")
+    await update.message.reply_text("➕ Fon eklemek için: `/ekle <sembol> <adet> <maliyet>`\n\nÖrnek: `/ekle TP2 1000 2.15`", parse_mode="Markdown")
 
 async def fon_sil_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🗑️ Fon silmek için şu formatta yazın:\n`/sil <sembol>`\n\nÖrnek: `/sil TP2`", parse_mode="Markdown")
+    await update.message.reply_text("🗑️ Fon silmek için: `/sil <sembol>`\n\nÖrnek: `/sil TP2`", parse_mode="Markdown")
 
 async def ekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -679,7 +664,7 @@ async def sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_remove_asset(user_id, symbol)
     await update.message.reply_text(f"🗑️ *{symbol}* portföyden silindi.", parse_mode="Markdown")
 
-# --- ARKA PLAN FİYAT & BİLDİRİM TAKİBİ ---
+# --- ARKA PLAN FİYAT ARTIŞ & BİLDİRİM TAKİPÇİSİ ---
 def start_price_monitor():
     async def monitor():
         from telegram import Bot
@@ -718,7 +703,7 @@ def start_price_monitor():
                                     f"💵 *Eski Fiyat:* `{fmt(old_price, 6)} TL`\n"
                                     f"🟢 *Yeni Fiyat:* `{fmt(new_price, 6)} TL`\n"
                                     f"📊 *Değişim:* `+% {pct:.2f}` (`+{fmt(diff, 6)} TL`)\n\n"
-                                    f"💼 *Portföyünüzdeki Etkisi:*\n"
+                                    f"💼 *Portföy Etkisi:*\n"
                                     f"📦 *Adet:* `{fmt(amt, 2)}` \n"
                                     f"💰 *Anlık Kar Kazancı:* `+{fmt(gain, 2)} TL`\n"
                                     f"📈 *Toplam Fon Değeri:* `{fmt(total_val, 2)} TL`"
@@ -765,10 +750,10 @@ def main():
             application.add_handler(CommandHandler("takipsil", takip_sil_cmd))
             application.add_handler(CommandHandler("ara", fon_ara_cmd))
 
-            # Inline Callback Handlers
+            # Inline Callbacks
             application.add_handler(CallbackQueryHandler(settings_callback))
 
-            # Buton Mesaj Yakalayıcılar
+            # Menü Buton Yakalayıcılar
             application.add_handler(MessageHandler(filters.Regex(r"^📊 Portföyüm$"), portfoy))
             application.add_handler(MessageHandler(filters.Regex(r"^📈 Grafik$"), grafik))
             application.add_handler(MessageHandler(filters.Regex(r"^👀 Takip Listesi$"), takip_listesi_view))
