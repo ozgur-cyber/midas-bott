@@ -232,17 +232,15 @@ def db_get_cash(user_id: int) -> float:
     conn.close()
     return row[0] if row else 0.0
 
-def db_update_cash(user_id: int, delta: float, is_set: bool = False):
+def db_set_cash(user_id: int, amount: float):
     conn = sqlite3.connect("portfolio.db")
     cursor = conn.cursor()
-    current = db_get_cash(user_id)
-    new_bal = delta if is_set else current + delta
-    if new_bal < 0: new_bal = 0.0
-    cursor.execute("INSERT OR REPLACE INTO cash (user_id, balance) VALUES (?, ?)", (user_id, new_bal))
-    cursor.execute("INSERT INTO history (user_id, symbol, action, amount, price) VALUES (?, 'NAKİT', 'NAKIT_GUNCELLE', ?, ?)", (user_id, new_bal, 0))
+    if amount < 0: amount = 0.0
+    cursor.execute("INSERT OR REPLACE INTO cash (user_id, balance) VALUES (?, ?)", (user_id, amount))
+    cursor.execute("INSERT INTO history (user_id, symbol, action, amount, price) VALUES (?, 'NAKİT', 'NAKIT_AYARLA', ?, ?)", (user_id, amount, 0))
     conn.commit()
     conn.close()
-    return new_bal
+    return amount
 
 # --- BOT KOMUTLARI & HANDLERLARI ---
 
@@ -251,7 +249,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 *Midas & TEFAS Portföy Takip Botu*\n\n"
         "Menüyü kullanarak işlemlerinizi yapabilirsiniz.\n"
         "🔹 Fon Ekleme: `/ekle <sembol> <adet> <maliyet>`\n"
-        "🔹 Fon Silme: `/sil <sembol>`"
+        "🔹 Fon Silme: `/sil <sembol>`\n"
+        "🔹 Nakit Ayarlama: `/nakit <tutar>`"
     )
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -436,33 +435,20 @@ async def nakit_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"💵 *NAKİT PORTFÖYÜ*\n\n"
         f"Mevcut Nakit Bakiyeniz: `{bal_str}`\n\n"
-        f"💡 *Nakit Güncelleme Komutları:*\n"
-        f"🔹 Nakit Ekle: `/nakitekle <tutar>`\n"
-        f"🔹 Nakit Çıkar: `/nakitcikar <tutar>`"
+        f"💡 *Nakit Ayarlama Komutu:*\n"
+        f"🔹 `/nakit <tutar>` (Örn: `/nakit 500`)"
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-async def nakit_ekle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def nakit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
-        await update.message.reply_text("❌ Kullanım: `/nakitekle 1000`", parse_mode="Markdown")
+        await update.message.reply_text("❌ Kullanım: `/nakit 500`", parse_mode="Markdown")
         return
     try:
         val = float(context.args[0].replace(',', '.'))
-        new_bal = db_update_cash(user_id, val)
-        await update.message.reply_text(f"✅ Nakit eklendi! Yeni Bakiye: `{fmt(new_bal, 2)} TL`", parse_mode="Markdown")
-    except ValueError:
-        await update.message.reply_text("❌ Geçerli bir sayı yazın.")
-
-async def nakit_cikar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not context.args:
-        await update.message.reply_text("❌ Kullanım: `/nakitcikar 500`", parse_mode="Markdown")
-        return
-    try:
-        val = float(context.args[0].replace(',', '.'))
-        new_bal = db_update_cash(user_id, -val)
-        await update.message.reply_text(f"✅ Nakit çıkarıldı! Yeni Bakiye: `{fmt(new_bal, 2)} TL`", parse_mode="Markdown")
+        new_bal = db_set_cash(user_id, val)
+        await update.message.reply_text(f"✅ Nakit bakiyeniz `{fmt(new_bal, 2)} TL` olarak güncellendi!", parse_mode="Markdown")
     except ValueError:
         await update.message.reply_text("❌ Geçerli bir sayı yazın.")
 
@@ -744,8 +730,7 @@ def main():
             application.add_handler(CommandHandler("sil", sil))
             application.add_handler(CommandHandler("portfoy", portfoy))
             application.add_handler(CommandHandler("grafik", grafik))
-            application.add_handler(CommandHandler("nakitekle", nakit_ekle_cmd))
-            application.add_handler(CommandHandler("nakitcikar", nakit_cikar_cmd))
+            application.add_handler(CommandHandler("nakit", nakit_cmd))
             application.add_handler(CommandHandler("takip", takip_ekle_cmd))
             application.add_handler(CommandHandler("takipsil", takip_sil_cmd))
             application.add_handler(CommandHandler("ara", fon_ara_cmd))
