@@ -201,7 +201,7 @@ def db_get_history(user_id: int):
     return rows
 
 # ---------------------------------------------------------------------------
-# TCMB DÖVİZ KURU VE ÇİFT KATMANLI TEFAS VERİ ÇEKİCİ
+# TCMB DÖVİZ KURU VE ÇEREZ DESTEKLİ TEFAS VERİ ÇEKİCİ
 # ---------------------------------------------------------------------------
 def get_tcmb_usd_rate() -> float:
     url = "https://www.tcmb.gov.tr/kurlar/today.xml"
@@ -219,19 +219,21 @@ def get_tcmb_usd_rate() -> float:
 
 def fetch_tefas_data(fon_kodu: str) -> dict:
     fon_kodu = fon_kodu.upper().strip()
-    
-    # 1. YÖNTEM: TEFAS FonAnaliz Sayfası Scraping (HTTP 404 ve Ban Önleme)
+    session = async_requests.Session(impersonate="chrome")
+
+    # 1. YÖNTEM: Oturum Çerezi Alarak Web Scraping
     web_url = f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={fon_kodu}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": "https://www.tefas.gov.tr/"
     }
 
     try:
-        response = async_requests.get(web_url, headers=headers, impersonate="chrome", timeout=12)
-        if response.status_code == 200:
-            html = response.text
-            
+        init_res = session.get(web_url, headers=headers, timeout=12)
+        if init_res.status_code == 200:
+            html = init_res.text
             price_match = re.search(r'id="MainContent_m_lblFiyat">([^<]+)<', html)
             title_match = re.search(r'id="MainContent_m_lblFonUnvan">([^<]+)<', html)
             getiri_match = re.search(r'id="MainContent_m_lblGunlukGetiri">([^<]+)<', html)
@@ -260,7 +262,7 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
     except Exception as e:
         logger.error(f"TEFAS Web Scraping Hatası ({fon_kodu}): {e}")
 
-    # 2. YÖNTEM: TEFAS JSON API (Yedek Katman)
+    # 2. YÖNTEM: TEFAS JSON API (Çerez ve Tam Header Destekli)
     api_url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
     end_date = datetime.now()
     start_date = end_date - timedelta(days=7)
@@ -274,14 +276,17 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
     }
 
     api_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
         "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Origin": "https://www.tefas.gov.tr",
-        "Referer": "https://www.tefas.gov.tr/FonAnaliz.aspx"
+        "Referer": f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={fon_kodu}"
     }
 
     try:
-        res = async_requests.post(api_url, data=payload, headers=api_headers, impersonate="chrome", timeout=12)
+        res = session.post(api_url, data=payload, headers=api_headers, timeout=12)
         if res.status_code == 200:
             res_json = res.json()
             data_list = res_json.get("data", [])
@@ -629,7 +634,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"📈 **Portföy Ortalama Performansı:** %{genel_getiri:+.2f}", parse_mode="Markdown")
 
     elif "Ayarlar" in text:
-        await update.message.reply_text("⚙️ **Sistem Ayarları:**\n\n• Veritabanı: SQLite (Aktif)\n• Sunucu: Render Keep-Alive (Aktif)\n• TEFAS Entegrasyonu: Canlı Web Scraping + API Fallback (Aktif)", parse_mode="Markdown")
+        await update.message.reply_text("⚙️ **Sistem Ayarları:**\n\n• Veritabanı: SQLite (Aktif)\n• Sunucu: Render Keep-Alive (Aktif)\n• TEFAS Entegrasyonu: Canlı Oturum & Çerez Desteği (Aktif)", parse_mode="Markdown")
 
     else:
         await update.message.reply_text("ℹ️ Komut anlaşılamadı. Lütfen menüdeki butonları kullanın.", reply_markup=get_main_keyboard())
