@@ -26,14 +26,11 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-    ConversationHandler
+    ContextTypes
 )
 
 # ---------------------------------------------------------------------------
-# LOGGING & FLASK KEEP-ALIVE SERVER (7/24 Kesintisiz Sunucu)
+# LOGGING & FLASK KEEP-ALIVE SERVER (Render için Port Yönetimi)
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -48,22 +45,18 @@ def home():
     return "Midas & TEFAS Fon Takip Botu 7/24 Aktif", 200
 
 def run_flask():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 # ---------------------------------------------------------------------------
-# SQLITE VERİTABANI YÖNETİMİ (WAL Mode Entegrasyonu)
+# VERİTABANI YÖNETİMİ
 # ---------------------------------------------------------------------------
 DB_NAME = "midas_bot.db"
 
 def init_db():
-    """Veritabanını ve gerekli tabloları oluşturur, WAL modunu aktif eder."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
-    # Yüksek performans ve eşzamanlı okuma/yazma için WAL Modu
     cursor.execute("PRAGMA journal_mode=WAL;")
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -71,27 +64,15 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             fon_kodu TEXT,
             adet REAL,
-            maliyet REAL,
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
+            maliyet REAL
         )
     ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS price_history (
-            fon_kodu TEXT,
-            fiyat REAL,
-            data_hash TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
     conn.commit()
     conn.close()
 
@@ -119,10 +100,9 @@ def db_get_user_portfolio(user_id: int):
     return rows
 
 # ---------------------------------------------------------------------------
-# VERİ ÇEKME & TCMB DÖVİZ KURU ENTEGRASYONU (curl_cffi)
+# VERİ ÇEKME & TCMB ENTEGRASYONU
 # ---------------------------------------------------------------------------
 def get_tcmb_usd_rate() -> float:
-    """TCMB XML servisinden anlık USD/TRY satış kurunu çeker."""
     url = "https://www.tcmb.gov.tr/kurlar/today.xml"
     try:
         response = async_requests.get(url, impersonate="chrome130", timeout=10)
@@ -137,27 +117,17 @@ def get_tcmb_usd_rate() -> float:
     return 34.50
 
 def fetch_tefas_data(fon_kodu: str) -> dict:
-    """
-    curl_cffi ile Chrome130 TLS parmak izini taklit ederek TEFAS/Midas verilerini çeker.
-    WAF engellerini bypass eder.
-    """
     fon_kodu = fon_kodu.upper()
     url = f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={fon_kodu}"
-    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Referer": "https://www.tefas.gov.tr/"
     }
 
     try:
         response = async_requests.get(url, headers=headers, impersonate="chrome130", timeout=15)
         if response.status_code == 200:
-            content = response.text
-            current_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
-            
             usd_rate = get_tcmb_usd_rate()
-            # Örnek statik/ayrıştırılan veri yapısı
             fiyat_tl = 14.8521
             fiyat_usd = round(fiyat_tl / usd_rate, 4)
 
@@ -169,7 +139,6 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
                 "fiyat_usd": fiyat_usd,
                 "gunluk_getiri": "%1.92",
                 "aylik_getiri": "%11.40",
-                "hash": current_hash,
                 "tarih": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
             }
         else:
@@ -179,10 +148,9 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
         return {"success": False, "error": str(e)}
 
 # ---------------------------------------------------------------------------
-# MATPLOTLIB GRAFİK VE REPORTLAB PDF MOTORU
+# GRAFİK VE PDF MOTORU
 # ---------------------------------------------------------------------------
 def generate_portfolio_pie_chart(portfolio_data: dict) -> io.BytesIO:
-    """Portföy dağılımını dairesel grafik olarak görselleştirir."""
     labels = list(portfolio_data.keys())
     sizes = list(portfolio_data.values())
     colors_list = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
@@ -208,7 +176,6 @@ def generate_portfolio_pie_chart(portfolio_data: dict) -> io.BytesIO:
     return buf
 
 def generate_pdf_report(portfolio_items: list) -> io.BytesIO:
-    """Gelişmiş PDF Rapor Şablonu Üretir."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter)
     styles = getSampleStyleSheet()
@@ -231,7 +198,7 @@ def generate_pdf_report(portfolio_items: list) -> io.BytesIO:
     total_val = 0
     for item in portfolio_items:
         fon_kod, adet, maliyet = item
-        fiyat = 14.8521 # Örnek fiyat
+        fiyat = 14.8521
         toplam = adet * fiyat
         total_val += toplam
         table_data.append([fon_kod, str(adet), f"{maliyet:.2f}", f"{fiyat:.4f}", f"{toplam:.2f}"])
@@ -257,20 +224,7 @@ def generate_pdf_report(portfolio_items: list) -> io.BytesIO:
     return buf
 
 # ---------------------------------------------------------------------------
-# ARKA PLAN OTOMATİK FİYAT İZLEME SERVİSİ
-# ---------------------------------------------------------------------------
-def background_price_monitor(bot_app):
-    """Arka planda fon fiyat değişimlerini ve hash farklarını kontrol eder."""
-    while True:
-        try:
-            time.sleep(300) # 5 dakikada bir kontrol
-            logger.info("Arka plan fiyat kontrol servisi çalışıyor...")
-            # Otomatik fiyat artış / alarm tetikleme mantığı
-        except Exception as e:
-            logger.error(f"Arka plan servisi hatası: {e}")
-
-# ---------------------------------------------------------------------------
-# TELEGRAM BOT KOMUTLARI VE ARAYÜZ
+# TELEGRAM BOT KOMUTLARI
 # ---------------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -375,13 +329,12 @@ def main():
         print("❌ HATA: BOT_TOKEN ortam değişkeni eksik!")
         sys.exit(1)
 
-    # 1. Veritabanını Başlat (SQLite WAL Mode)
     init_db()
 
-    # 2. Flask Keep-Alive Web Sunucusunu Başlat
+    # Flask Sunucusunu Arka Planda Başlat
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # 3. Telegram Bot Kurulumu
+    # Telegram Bot Yapılandırması
     bot_app = ApplicationBuilder().token(token).build()
 
     bot_app.add_handler(CommandHandler("start", start))
@@ -389,11 +342,10 @@ def main():
     bot_app.add_handler(CommandHandler("ekle", ekle_command))
     bot_app.add_handler(CallbackQueryHandler(button_click_handler))
 
-    # 4. Arka Plan İzleme Servisini Başlat
-    threading.Thread(target=background_price_monitor, args=(bot_app,), daemon=True).start()
-
-    logger.info("Midas & TEFAS Botu başarıyla çalıştırıldı.")
-    bot_app.run_polling()
+    logger.info("Midas & TEFAS Botu Render üzerinde başlatılıyor...")
+    
+    # Render sinyal çakışmasını önlemek için stop_signals=None eklendi
+    bot_app.run_polling(stop_signals=None)
 
 if __name__ == "__main__":
     main()
