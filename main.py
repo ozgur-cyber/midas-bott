@@ -2,6 +2,7 @@ import os
 import sys
 import re
 import time
+import json
 import sqlite3
 import logging
 import threading
@@ -50,7 +51,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # ---------------------------------------------------------------------------
-# GELİŞMİŞ VERİTABANI YÖNETİMİ (SQLite)
+# VERİTABANI YÖNETİMİ (SQLite)
 # ---------------------------------------------------------------------------
 DB_NAME = "midas_bot.db"
 
@@ -201,7 +202,7 @@ def db_get_history(user_id: int):
     return rows
 
 # ---------------------------------------------------------------------------
-# TCMB DÖVİZ KURU VE ÇOKLU KAYNAKLI FON VERİ ÇEKİCİ
+# KUR VE FON VERİ ÇEKİCİ (FINTABLES + İŞ YATIRIM + TEFAS)
 # ---------------------------------------------------------------------------
 def get_tcmb_usd_rate() -> float:
     url = "https://www.tcmb.gov.tr/kurlar/today.xml"
@@ -221,78 +222,54 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
     fon_kodu = fon_kodu.upper().strip()
     usd_rate = get_tcmb_usd_rate()
 
-    # --- 1. KATMAN: TEFAS API (YAT ve EMK Fon Türü Taraması) ---
-    for fontip in ["YAT", "EMK"]:
-        try:
-            api_url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=10)
-
-            payload = {
-                "fontip": fontip,
-                "sorgutipi": "1",
-                "bastarih": start_date.strftime("%d.%m.%Y"),
-                "bittarih": end_date.strftime("%d.%m.%Y"),
-                "fonkod": fon_kodu
-            }
-
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "X-Requested-With": "XMLHttpRequest",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Origin": "https://www.tefas.gov.tr",
-                "Referer": "https://www.tefas.gov.tr/FonAnaliz.aspx"
-            }
-
-            res = async_requests.post(api_url, data=payload, headers=headers, timeout=8, impersonate="chrome")
-            if res.status_code == 200:
-                res_json = res.json()
-                data_list = res_json.get("data", [])
-                if data_list:
-                    latest = data_list[-1]
-                    fiyat_tl = float(latest.get("FIYAT", 0.0))
-                    fon_adi = latest.get("FONUNVAN", f"{fon_kodu} Fonu")
-
-                    gunluk_getiri = "%0.00"
-                    if len(data_list) >= 2:
-                        prev_fiyat = float(data_list[-2].get("FIYAT", fiyat_tl))
-                        if prev_fiyat > 0:
-                            change = ((fiyat_tl - prev_fiyat) / prev_fiyat) * 100
-                            gunluk_getiri = f"%{change:+.2f}"
-
-                    fiyat_usd = round(fiyat_tl / usd_rate, 4) if usd_rate > 0 else 0.0
-                    return {
-                        "success": True,
-                        "fon_kodu": fon_kodu,
-                        "fon_adi": fon_adi,
-                        "fiyat_tl": fiyat_tl,
-                        "fiyat_usd": fiyat_usd,
-                        "gunluk_getiri": gunluk_getiri,
-                        "tarih": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-                    }
-        except Exception as e:
-            logger.error(f"TEFAS API ({fontip}) Deneme Hatası ({fon_kodu}): {e}")
-
-    # --- 2. KATMAN: BIGPARA YEDEK KAYNAK (TEFAS IP Engellerini Aşmak İçin) ---
+    # --- 1. KATMAN: FINTABLES (Serbest Fonlar ve Tüm TEFAS Fonları Dahil) ---
     try:
-        bp_url = f"https://bigpara.hurriyet.com.tr/fonlar/fon-detay/{fon_kodu}/"
-        bp_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        ft_url = f"https://fintables.com/fonlar/{fon_kodu}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
-        bp_res = async_requests.get(bp_url, headers=bp_headers, timeout=8, impersonate="chrome")
-        if bp_res.status_code == 200:
-            html = bp_res.text
-            price_match = re.search(r'class="value[^">]*">\s*([0-9.,]+)\s*</span>', html)
-            title_match = re.search(r'<h1[^>]*>\s*([^<]+)\s*</h1>', html)
+        res = async_requests.get(ft_url, headers=headers, timeout=8, impersonate="chrome")
+        if res.status_code == 200:
+            match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', res.text, re.DOTALL)
+            if match:
+                json_data = json.loads(match.group(1))
+                page_props = json_data.get("props", {}).get("pageProps", {})
+                fund_info = page_props.get("fund", {}) or page_props.get("data", {})
+                
+                if fund_info:
+                    fiyat_tl = float(fund_info.get("price") or fund_info.get("latest_price") or 0.0)
+                    fon_adi = fund_info.get("title") or fund_info.get("name") or f"{fon_kodu} Fonu"
+                    daily_ret = fund_info.get("daily_return") or fund_info.get("day_return") or 0.0
+                    
+                    if fiyat_tl > 0:
+                        fiyat_usd = round(fiyat_tl / usd_rate, 4) if usd_rate > 0 else 0.0
+                        return {
+                            "success": True,
+                            "fon_kodu": fon_kodu,
+                            "fon_adi": fon_adi,
+                            "fiyat_tl": fiyat_tl,
+                            "fiyat_usd": fiyat_usd,
+                            "gunluk_getiri": f"%{float(daily_ret):+.2f}",
+                            "tarih": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                        }
+    except Exception as e:
+        logger.error(f"Fintables Scraping Hatası ({fon_kodu}): {e}")
 
+    # --- 2. KATMAN: İŞ YATIRIM (Yedek Kaynak) ---
+    try:
+        iy_url = f"https://www.isyatirim.com.tr/tr-tr/analiz/fonlar/Sayfalar/fon-detay.aspx?fonk={fon_kodu}"
+        res = async_requests.get(iy_url, timeout=8, impersonate="chrome")
+        if res.status_code == 200:
+            html = res.text
+            price_match = re.search(r'Son Fiyat[^\d]*([0-9.,]+)', html, re.IGNORECASE)
+            title_match = re.search(r'<h1[^>]*>\s*([^<]+)\s*</h1>', html)
+            
             if price_match:
                 raw_p = price_match.group(1).replace(".", "").replace(",", ".")
                 fiyat_tl = float(raw_p)
-                fon_adi = title_match.group(1).strip() if title_match else f"{fon_kodu} Yatırım Fonu"
+                fon_adi = title_match.group(1).strip() if title_match else f"{fon_kodu} Fonu"
                 fiyat_usd = round(fiyat_tl / usd_rate, 4) if usd_rate > 0 else 0.0
-
                 return {
                     "success": True,
                     "fon_kodu": fon_kodu,
@@ -303,9 +280,48 @@ def fetch_tefas_data(fon_kodu: str) -> dict:
                     "tarih": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
                 }
     except Exception as e:
-        logger.error(f"Bigpara Scraping Hatası ({fon_kodu}): {e}")
+        logger.error(f"İş Yatırım Scraping Hatası ({fon_kodu}): {e}")
 
-    return {"success": False, "error": f"'{fon_kodu}' TEFAS veya yedek finans servislerinde bulunamadı."}
+    # --- 3. KATMAN: TEFAS API (Yerel/TR Bağlantılar İçin) ---
+    for fontip in ["YAT", "EMK"]:
+        try:
+            api_url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=10)
+            payload = {
+                "fontip": fontip,
+                "sorgutipi": "1",
+                "bastarih": start_date.strftime("%d.%m.%Y"),
+                "bittarih": end_date.strftime("%d.%m.%Y"),
+                "fonkod": fon_kodu
+            }
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": "https://www.tefas.gov.tr",
+                "Referer": "https://www.tefas.gov.tr/FonAnaliz.aspx"
+            }
+            res = async_requests.post(api_url, data=payload, headers=headers, timeout=5, impersonate="chrome")
+            if res.status_code == 200:
+                data_list = res.json().get("data", [])
+                if data_list:
+                    latest = data_list[-1]
+                    fiyat_tl = float(latest.get("FIYAT", 0.0))
+                    fon_adi = latest.get("FONUNVAN", f"{fon_kodu} Fonu")
+                    fiyat_usd = round(fiyat_tl / usd_rate, 4) if usd_rate > 0 else 0.0
+                    return {
+                        "success": True,
+                        "fon_kodu": fon_kodu,
+                        "fon_adi": fon_adi,
+                        "fiyat_tl": fiyat_tl,
+                        "fiyat_usd": fiyat_usd,
+                        "gunluk_getiri": "%0.00",
+                        "tarih": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                    }
+        except Exception:
+            pass
+
+    return {"success": False, "error": f"'{fon_kodu}' kodu hiçbir veritabanında bulunamadı."}
 
 # ---------------------------------------------------------------------------
 # PORTFÖY ÖZETİ TASARIMI
@@ -622,7 +638,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"📈 **Portföy Ortalama Performansı:** %{genel_getiri:+.2f}", parse_mode="Markdown")
 
     elif "Ayarlar" in text:
-        await update.message.reply_text("⚙️ **Sistem Ayarları:**\n\n• Veritabanı: SQLite (Aktif)\n• Sunucu: Render Keep-Alive (Aktif)\n• TEFAS & Bigpara Entegrasyonu (Aktif)", parse_mode="Markdown")
+        await update.message.reply_text("⚙️ **Sistem Ayarları:**\n\n• Veritabanı: SQLite (Aktif)\n• Sunucu: Render Keep-Alive (Aktif)\n• Fintables & İş Yatırım Entegrasyonu (Aktif)", parse_mode="Markdown")
 
     else:
         await update.message.reply_text("ℹ️ Komut anlaşılamadı. Lütfen menüdeki butonları kullanın.", reply_markup=get_main_keyboard())
