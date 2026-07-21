@@ -1,11 +1,9 @@
 import os
 import sys
-import re
 import logging
 import threading
 from flask import Flask
 import requests
-from bs4 import BeautifulSoup
 
 from telegram import Update
 from telegram.ext import (
@@ -34,74 +32,22 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # ---------------------------------------------------------------------------
-# FON VERİ ÇEKİCİ (GOOGLE FINANCE + FONBUL + TEFAS ENGINE)
+# FON VERİ ÇEKİCİ (TEFAS LİSTE API)
 # ---------------------------------------------------------------------------
 def fetch_fund_data(fon_kodu: str) -> dict:
     fon_kodu = fon_kodu.upper().strip()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
+        "Accept": "application/json, text/plain, */*"
     }
 
-    # 1. YÖNTEM: GOOGLE FINANCE (Yurt Dışı IP Engeli Kesinlikle Yoktur)
-    try:
-        url = f"https://www.google.com/finance/quote/{fon_kodu}:MUTUALFUND_TR"
-        res = requests.get(url, headers=headers, timeout=8)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
-            price_div = soup.find("div", {"class": "YMlBx"}) or soup.find("div", {"class": "fxHfh"})
-            title_div = soup.find("div", {"class": "zz2A2"}) or soup.find("h1")
-
-            if price_div:
-                raw_price = price_div.text.replace("₺", "").replace(".", "").replace(",", ".").strip()
-                # Temiz sayı ayıklama
-                p_match = re.search(r'([0-9]+\.[0-9]+)', raw_price)
-                if p_match:
-                    fiyat = float(p_match.group(1))
-                    fon_adi = title_div.text.strip() if title_div else f"{fon_kodu} Fonu"
-                    return {
-                        "success": True,
-                        "fon_kodu": fon_kodu,
-                        "fon_adi": fon_adi,
-                        "fiyat": fiyat,
-                        "kaynak": "Google Finance"
-                    }
-    except Exception as e:
-        logger.warning(f"Google Finance Hatası ({fon_kodu}): {e}")
-
-    # 2. YÖNTEM: FONBUL (Yedek Kaynak)
-    try:
-        url = f"https://www.fonbul.com/FonBulPlus/YatirimFonlari/FonProfilleri/FonAnaliz/{fon_kodu}"
-        res = requests.get(url, headers=headers, timeout=8)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
-            
-            # Fiyat ve Unvan parse
-            price_elem = soup.find(id="ContentPlaceHolder1_lblFiyat") or soup.find("span", string=re.compile(r'Fiyat'))
-            title_elem = soup.find("h1") or soup.find("title")
-
-            if price_elem:
-                price_text = price_elem.text.replace(".", "").replace(",", ".").strip()
-                p_match = re.search(r'([0-9]+\.[0-9]+)', price_text)
-                if p_match:
-                    fiyat = float(p_match.group(1))
-                    fon_adi = title_elem.text.strip() if title_elem else f"{fon_kodu} Fonu"
-                    return {
-                        "success": True,
-                        "fon_kodu": fon_kodu,
-                        "fon_adi": fon_adi,
-                        "fiyat": fiyat,
-                        "kaynak": "Fonbul Altyapısı"
-                    }
-    except Exception as e:
-        logger.warning(f"Fonbul Hatası ({fon_kodu}): {e}")
-
-    # 3. YÖNTEM: TEFAS GENEL LISTE (FALLBACK)
+    # Render IP kısıtlamasına takılmayan doğrudan TEFAS genel sıralı liste endpoint'i
     try:
         url = "https://www.tefas.gov.tr/api/funds/fonGnlBlgSiraliGetir"
-        res = requests.post(url, json={"kind": "YAT"}, headers=headers, timeout=5)
+        res = requests.post(url, json={"kind": "YAT"}, headers=headers, timeout=10)
         if res.status_code == 200:
-            for item in res.json():
+            data = res.json()
+            for item in data:
                 code = item.get("FONKOD") or item.get("fon_kod") or item.get("fund_code")
                 if code and str(code).strip().upper() == fon_kodu:
                     fiyat = float(item.get("FIYAT") or item.get("fiyat") or 0.0)
@@ -114,9 +60,9 @@ def fetch_fund_data(fon_kodu: str) -> dict:
                         "kaynak": "TEFAS API"
                     }
     except Exception as e:
-        logger.warning(f"TEFAS Direct Hatası ({fon_kodu}): {e}")
+        logger.warning(f"TEFAS API Hatası ({fon_kodu}): {e}")
 
-    return {"success": False, "error": f"'{fon_kodu}' fonu veritabanlarında bulunamadı."}
+    return {"success": False, "error": f"'{fon_kodu}' fonu veritabanında bulunamadı."}
 
 # ---------------------------------------------------------------------------
 # TELEGRAM BOT HANDLERS
