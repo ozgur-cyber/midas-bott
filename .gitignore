@@ -1,5 +1,8 @@
-portfolio.db
-.env
+venv/
+node_modules/
 __pycache__/
-*.png
-*.pdf
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+.env
