@@ -357,12 +357,12 @@ async def ayarlar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            InlineKeyboardButton("🔀 Para Birimi Değiştir", callback_query_data="set_curr_toggle"),
-            InlineKeyboardButton("👁️/🙈 Bakiye Gizle", callback_query_data="set_hide_toggle")
+            InlineKeyboardButton("🔀 Para Birimi Değiştir", callback_data="set_curr_toggle"),
+            InlineKeyboardButton("👁️/🙈 Bakiye Gizle", callback_data="set_hide_toggle")
         ],
         [
-            InlineKeyboardButton("🔔 Bildirimleri Değiştir", callback_query_data="set_notify_toggle"),
-            InlineKeyboardButton("📥 Veritabanı Yedeği Al", callback_query_data="get_backup")
+            InlineKeyboardButton("🔔 Bildirimleri Değiştir", callback_data="set_notify_toggle"),
+            InlineKeyboardButton("📥 Veritabanı Yedeği Al", callback_data="get_backup")
         ]
     ]
 
