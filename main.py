@@ -21,16 +21,18 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes
+    ContextTypes,
+    MessageHandler,
+    filters
 )
 
 # ---------------------------------------------------------------------------
-# LOGGING & FLASK KEEP-ALIVE SERVER (Render için Port Yönetimi)
+# LOGGING & FLASK KEEP-ALIVE SERVER
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -224,23 +226,45 @@ def generate_pdf_report(portfolio_items: list) -> io.BytesIO:
     return buf
 
 # ---------------------------------------------------------------------------
-# TELEGRAM BOT KOMUTLARI
+# İŞLEM MANTIĞI (ORTAK KULLANIM)
+# ---------------------------------------------------------------------------
+async def handle_portfoy_view(user_id: int, send_func):
+    rows = db_get_user_portfolio(user_id)
+    if not rows:
+        await send_func("ℹ️ Portföyünüzde henüz fon bulunmuyor. Fon eklemek için `/ekle <FON_KODU> <ADET> <MALİYET>` yazabilirsiniz.")
+        return
+
+    portfolio_dict = {row[0]: row[1] for row in rows}
+    chart_buf = generate_portfolio_pie_chart(portfolio_dict)
+    await send_func("photo", chart_buf, "📊 **Portföy Varlık Dağılımınız**")
+
+async def handle_pdf_view(user_id: int, send_func):
+    rows = db_get_user_portfolio(user_id)
+    if not rows:
+        await send_func("⚠️ Rapor oluşturmak için önce portföyünüze fon eklemelisiniz.")
+        return
+    
+    pdf_buf = generate_pdf_report(rows)
+    await send_func("doc", pdf_buf, f"Midas_Portfoy_Raporu_{datetime.now().strftime('%Y%m%d')}.pdf")
+
+# ---------------------------------------------------------------------------
+# TELEGRAM BOT KOMUTLARI VE METİN DİNLEYİCİSİ
 # ---------------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user_to_db(user.id, user.username or "Bilinmeyen")
 
-    keyboard = [
+    inline_keyboard = [
         [InlineKeyboardButton("📊 Portföyüm", callback_data="btn_portfoy"), InlineKeyboardButton("📈 Fon Sorgula", callback_data="btn_sorgu")],
         [InlineKeyboardButton("📄 PDF Raporu", callback_data="btn_pdf"), InlineKeyboardButton("💵 TCMB USD Kuru", callback_data="btn_usd")],
         [InlineKeyboardButton("➕ Fon Ekle", callback_data="btn_ekle")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = InlineKeyboardMarkup(inline_keyboard)
 
     await update.message.reply_text(
         f"👋 Merhaba **{user.first_name}**!\n\n"
         "**Midas & TEFAS Fon Takip Sistemine** hoş geldin.\n"
-        "Aşağıdaki menüyü kullanarak işlemlerini gerçekleştirebilirsin.",
+        "Aşağıdaki butonları veya mesaj klavyesini kullanarak işlemlerini gerçekleştirebilirsin.",
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
@@ -280,7 +304,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if not rows:
             await query.message.reply_text("ℹ️ Portföyünüzde henüz fon bulunmuyor. '➕ Fon Ekle' butonunu kullanabilirsiniz.")
             return
-
         portfolio_dict = {row[0]: row[1] for row in rows}
         chart_buf = generate_portfolio_pie_chart(portfolio_dict)
         await query.message.reply_photo(photo=chart_buf, caption="📊 **Portföy Varlık Dağılımınız**", parse_mode="Markdown")
@@ -290,7 +313,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if not rows:
             await query.message.reply_text("⚠️ Rapor oluşturmak için önce portföyünüze fon eklemelisiniz.")
             return
-        
         pdf_buf = generate_pdf_report(rows)
         await query.message.reply_document(
             document=pdf_buf, 
@@ -302,8 +324,47 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         rate = get_tcmb_usd_rate()
         await query.message.reply_text(f"💵 **TCMB Dolar Kuru:** `{rate} TL`", parse_mode="Markdown")
 
-    elif query.data == "btn_ekle":
-        await query.message.reply_text("Fon eklemek için komut formatı:\n`/ekle <FON_KODU> <ADET> <MALİYET>`\nÖrnek: `/ekle TCD 1500 12.50`", parse_mode="Markdown")
+    elif query.data == "btn_ekle" or query.data == "btn_sorgu":
+        await query.message.reply_text("📌 **Komut Kullanımları:**\n• Fon Sorgu: `/fon <KOD>` (Örn: `/fon TCD`)\n• Fon Ekle: `/ekle <KOD> <ADET> <MALİYET>` (Örn: `/ekle TCD 1000 12.50`)", parse_mode="Markdown")
+
+# ALT KLAVYEDEN GELEN YAZILI MESAJLARI İŞLEYEN YENİ HANDLER
+async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+
+    if "Portföy" in text:
+        rows = db_get_user_portfolio(user_id)
+        if not rows:
+            await update.message.reply_text("ℹ️ Portföyünüzde henüz fon bulunmuyor. `/ekle <FON_KODU> <ADET> <MALİYET>` yazarak ekleyebilirsiniz.")
+            return
+        portfolio_dict = {row[0]: row[1] for row in rows}
+        chart_buf = generate_portfolio_pie_chart(portfolio_dict)
+        await update.message.reply_photo(photo=chart_buf, caption="📊 **Portföy Varlık Dağılımınız**", parse_mode="Markdown")
+
+    elif "PDF" in text or "Rapor" in text:
+        rows = db_get_user_portfolio(user_id)
+        if not rows:
+            await update.message.reply_text("⚠️ Rapor oluşturmak için önce portföyünüze fon eklemelisiniz.")
+            return
+        pdf_buf = generate_pdf_report(rows)
+        await update.message.reply_document(
+            document=pdf_buf, 
+            filename=f"Midas_Portfoy_Raporu_{datetime.now().strftime('%Y%m%d')}.pdf",
+            caption="📄 **Detaylı Portföy PDF Raporunuz**"
+        )
+
+    elif "USD" in text or "Nakit" in text or "Kur" in text:
+        rate = get_tcmb_usd_rate()
+        await update.message.reply_text(f"💵 **TCMB Dolar Kuru:** `{rate} TL`", parse_mode="Markdown")
+
+    elif "Fon Ara" in text or "Fon Sorgula" in text or "Grafik" in text:
+        await update.message.reply_text("🔍 Fon sorgulamak veya grafik görmek için komut yazın:\n`/fon <KOD>` (Örn: `/fon TCD`)", parse_mode="Markdown")
+
+    elif "Fon Ekle" in text:
+        await update.message.reply_text("➕ Fon eklemek için komut formatı:\n`/ekle <FON_KODU> <ADET> <MALİYET>`\nÖrnek: `/ekle TCD 1500 12.50`", parse_mode="Markdown")
+
+    elif "Fon Sil" in text or "Ayarlar" in text or "Geçmiş" in text or "Performans" in text:
+        await update.message.reply_text("⚙️ İşlem gerçekleştirmek veya menüyü yenilemek için `/start` yazabilirsiniz.")
 
 async def ekle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 3:
@@ -341,10 +402,11 @@ def main():
     bot_app.add_handler(CommandHandler("fon", fon_sorgu))
     bot_app.add_handler(CommandHandler("ekle", ekle_command))
     bot_app.add_handler(CallbackQueryHandler(button_click_handler))
-
-    logger.info("Midas & TEFAS Botu Render üzerinde başlatılıyor...")
     
-    # Render sinyal çakışmasını önlemek için stop_signals=None eklendi
+    # Alt klavyeden ve mesajlardan gelen metinleri yakalayan handler eklendi
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
+
+    logger.info("Midas & TEFAS Botu başlatılıyor...")
     bot_app.run_polling(stop_signals=None)
 
 if __name__ == "__main__":
