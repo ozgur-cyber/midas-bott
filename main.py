@@ -1,176 +1,159 @@
 import os
+import sys
+import re
+import json
 import logging
-import asyncio
-import aiohttp
-from bs4 import BeautifulSoup
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import threading
+from datetime import datetime
+from flask import Flask
 
-# Logging ayarları
+from curl_cffi import requests as async_requests
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters
+)
+
+# ---------------------------------------------------------------------------
+# LOGGING & KEEP-ALIVE SERVER (RENDER 7/24)
+# ---------------------------------------------------------------------------
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("MidasBot")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "X-Requested-With": "XMLHttpRequest",
-    "Referer": "https://www.tefas.gov.tr/FonAnaliz.aspx",
-    "Accept": "application/json, text/plain, */*"
-}
+app = Flask(__name__)
 
-async def fetch_tefas_direct(session, code: str):
-    """1. Adım: Doğrudan TEFAS API Sorgusu"""
-    url = "https://www.tefas.gov.tr/api/funds/fonGnlBlgSiraliGetir"
+@app.route('/')
+def home():
+    return "Midas & TEFAS Fon Botu Aktif", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# ---------------------------------------------------------------------------
+# FON VERİ ÇEKİCİ (FINTABLES + İŞ YATIRIM + TEFAS ENGINE)
+# ---------------------------------------------------------------------------
+def fetch_fund_data(fon_kodu: str) -> dict:
+    fon_kodu = fon_kodu.upper().strip()
+
+    # 1. KATMAN: FINTABLES (Yurt Dışı IP Engeli Yoktur, AAL Dâhil Bütün Fonlar Vardır)
     try:
-        async with session.post(url, json={"kind": "YAT"}, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                for item in data:
-                    item_code = item.get("FONKOD") or item.get("fon_kod") or item.get("fund_code")
-                    if item_code and str(item_code).strip().upper() == code:
+        url = f"https://fintables.com/fonlar/{fon_kodu}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+        res = async_requests.get(url, headers=headers, timeout=10, impersonate="chrome")
+        if res.status_code == 200:
+            match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', res.text, re.DOTALL)
+            if match:
+                json_data = json.loads(match.group(1))
+                page_props = json_data.get("props", {}).get("pageProps", {})
+                fund_info = page_props.get("fund", {}) or page_props.get("data", {})
+                
+                if fund_info:
+                    fiyat = float(fund_info.get("price") or fund_info.get("latest_price") or 0.0)
+                    fon_adi = fund_info.get("title") or fund_info.get("name") or f"{fon_kodu} Fonu"
+                    daily_ret = fund_info.get("daily_return") or fund_info.get("day_return") or 0.0
+                    
+                    if fiyat > 0:
                         return {
-                            "code": code,
-                            "title": item.get("FONUNVAN") or item.get("fon_unvan") or code,
-                            "price": item.get("FIYAT") or item.get("fiyat") or "N/A",
-                            "daily_return": item.get("GUNLUKGETIRI") or item.get("gunluk_getiri") or 0.0
+                            "success": True,
+                            "fon_kodu": fon_kodu,
+                            "fon_adi": fon_adi,
+                            "fiyat": fiyat,
+                            "gunluk_getiri": f"%{float(daily_ret):+.2f}",
+                            "kaynak": "Fintables"
                         }
     except Exception as e:
-        logger.warning(f"TEFAS Direct Error: {e}")
-    return None
+        logger.warning(f"Fintables Hatası ({fon_kodu}): {e}")
 
-async def fetch_tefas_proxy(session, code: str):
-    """2. Adım: Render Yurt Dışı IP Engeline Karşı Proxy Üzerinden TEFAS Sorgusu"""
-    url = "https://corsproxy.io/?" + "https://www.tefas.gov.tr/api/funds/fonGnlBlgSiraliGetir"
+    # 2. KATMAN: İŞ YATIRIM (Yedek Kaynak)
     try:
-        async with session.post(url, json={"kind": "YAT"}, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=7)) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                for item in data:
-                    item_code = item.get("FONKOD") or item.get("fon_kod") or item.get("fund_code")
-                    if item_code and str(item_code).strip().upper() == code:
-                        return {
-                            "code": code,
-                            "title": item.get("FONUNVAN") or item.get("fon_unvan") or code,
-                            "price": item.get("FIYAT") or item.get("fiyat") or "N/A",
-                            "daily_return": item.get("GUNLUKGETIRI") or item.get("gunluk_getiri") or 0.0
-                        }
-    except Exception as e:
-        logger.warning(f"TEFAS Proxy Error: {e}")
-    return None
-
-async def fetch_fonbul_fallback(session, code: str):
-    """3. Adım: Alternatif Kaynak Scraping"""
-    url = f"https://www.fonbul.com/FonBulPlus/YatirimFonlari/FonProfilleri/FonAnaliz/{code}"
-    try:
-        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=6)) as resp:
-            if resp.status == 200:
-                html = await resp.text()
-                soup = BeautifulSoup(html, "html.parser")
-                
-                title_elem = soup.find("h1") or soup.find("title")
-                title = title_elem.text.strip() if title_elem else code
-                
-                price_elem = soup.select_one(".fon-fiyat, .price, .fiyat")
-                price = price_elem.text.strip() if price_elem else "Bulunamadı"
-                
+        iy_url = f"https://www.isyatirim.com.tr/tr-tr/analiz/fonlar/Sayfalar/fon-detay.aspx?fonk={fon_kodu}"
+        res = async_requests.get(iy_url, timeout=10, impersonate="chrome")
+        if res.status_code == 200:
+            html = res.text
+            price_match = re.search(r'Son Fiyat[^\d]*([0-9.,]+)', html, re.IGNORECASE)
+            title_match = re.search(r'<h1[^>]*>\s*([^<]+)\s*</h1>', html)
+            
+            if price_match:
+                raw_p = price_match.group(1).replace(".", "").replace(",", ".")
+                fiyat = float(raw_p)
+                fon_adi = title_match.group(1).strip() if title_match else f"{fon_kodu} Fonu"
                 return {
-                    "code": code,
-                    "title": title,
-                    "price": price,
-                    "daily_return": "N/A"
+                    "success": True,
+                    "fon_kodu": fon_kodu,
+                    "fon_adi": fon_adi,
+                    "fiyat": fiyat,
+                    "gunluk_getiri": "%0.00",
+                    "kaynak": "İş Yatırım"
                 }
     except Exception as e:
-        logger.warning(f"Fonbul Fallback Error: {e}")
-    return None
+        logger.warning(f"İş Yatırım Hatası ({fon_kodu}): {e}")
 
-async def get_fund_data(code: str):
-    code = code.strip().upper()
-    async with aiohttp.ClientSession() as session:
-        # 1. Doğrudan TEFAS
-        res = await fetch_tefas_direct(session, code)
-        if res:
-            return res
-            
-        # 2. Proxy Üzerinden TEFAS (Render IP Engelini Aşar)
-        res = await fetch_tefas_proxy(session, code)
-        if res:
-            return res
-            
-        # 3. Alternatif Kaynak
-        res = await fetch_fonbul_fallback(session, code)
-        if res:
-            return res
-            
-    return None
+    return {"success": False, "error": f"'{fon_kodu}' kodu hiçbir veritabanında bulunamadı."}
 
-def format_fund_message(data: dict) -> str:
-    code = data.get("code")
-    title = data.get("title")
-    price = data.get("price")
-    daily = data.get("daily_return")
-    
-    if isinstance(price, (int, float)):
-        price_str = f"{price:.6f} TL"
-    else:
-        price_str = f"{price} TL" if "TL" not in str(price) else str(price)
-        
-    if isinstance(daily, (int, float)):
-        daily_str = f"%{daily:+.2f}"
-    else:
-        daily_str = str(daily)
-
-    msg = (
-        f"📊 *Fon Detayı: {code}*\n\n"
-        f"🔹 *Fon Adı:* {title}\n"
-        f"💵 *Birim Fiyat:* `{price_str}`\n"
-        f"📈 *Günlük Getiri:* `{daily_str}`\n"
-    )
-    return msg
-
+# ---------------------------------------------------------------------------
+# TELEGRAM BOT KOMUTLARI
+# ---------------------------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "👋 *Midas Portföy Takip Botuna Hoş Geldiniz!*\n\n"
-        "Fon sorgulamak için komutu şu şekilde kullanabilirsiniz:\n"
-        "`/fon AAL` veya `/fon aal`"
+    msg = (
+        "👋 **Midas & TEFAS Fon Takip Botuna Hoş Geldiniz!**\n\n"
+        "Fon fiyatlarını anlık sorgulamak için:\n"
+        "`/fon AAL` veya `/fon aal` yazabilirsiniz."
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def fon_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ Lütfen bir fon kodu girin.\nÖrnek: `/fon AAL`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Lütfen sorgulamak istediğiniz fon kodunu girin.\nÖrnek: `/fon AAL`", parse_mode="Markdown")
         return
-        
-    raw_code = context.args[0]
-    clean_code = raw_code.strip().upper()
-    
-    status_msg = await update.message.reply_text(f"🔍 `{clean_code}` fonu sorgulanıyor...", parse_mode="Markdown")
-    
-    data = await get_fund_data(clean_code)
-    
-    if data and data.get("price") != "Bulunamadı":
-        reply_text = format_fund_message(data)
-        await status_msg.edit_text(reply_text, parse_mode="Markdown")
-    else:
-        await status_msg.edit_text(
-            f"❌ *Veri alınamadı:* `{clean_code}` TEFAS veritabanında bulunamadı veya sunuculardan yanıt alınamadı.",
-            parse_mode="Markdown"
+
+    fon_kodu = context.args[0].strip().upper()
+    status_msg = await update.message.reply_text(f"🔍 `{fon_kodu}` fonu sorgulanıyor...", parse_mode="Markdown")
+
+    data = fetch_fund_data(fon_kodu)
+
+    if data.get("success"):
+        reply = (
+            f"📊 **FON DETAYI: {data['fon_kodu']}**\n"
+            f"🏷️ *{data['fon_adi']}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 **Birim Fiyat:** `{data['fiyat']:.6f} TL`\n"
+            f"📈 **Günlük Getiri:** `{data['gunluk_getiri']}`\n"
+            f"📡 **Kaynak:** `{data['kaynak']}`"
         )
+        await status_msg.edit_text(reply, parse_mode="Markdown")
+    else:
+        await status_msg.edit_text(f"❌ Veri alınamadı: {data.get('error')}", parse_mode="Markdown")
 
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
 def main():
-    token = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+    token = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
     if not token:
-        logger.error("HATA: BOT_TOKEN çevre değişkeni (Environment Variable) tanımlı değil!")
-        return
+        logger.error("HATA: BOT_TOKEN bulunamadı!")
+        sys.exit(1)
 
+    # Flask Sunucusunu Arka Planda Başlat (Render Port İhtiyacı İçin)
+    threading.Thread(target=run_flask, daemon=True).start()
+
+    # Telegram Bot
     app = ApplicationBuilder().token(token).build()
-    
+
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", start_command))
     app.add_handler(CommandHandler("fon", fon_command))
-    
-    logger.info("Bot çalışıyor...")
+
+    logger.info("Bot başlatıldı...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
