@@ -6,7 +6,7 @@ import sqlite3
 import logging
 import threading
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
 
 from flask import Flask
@@ -117,7 +117,7 @@ def db_set_nakit(user_id: int, miktar: float):
     conn.close()
 
 # ---------------------------------------------------------------------------
-# GELİŞMİŞ TEFAS & TCMB PARSER
+# RESMİ TEFAS JSON API PARSER & TCMB KUR ENTEGRASYONU
 # ---------------------------------------------------------------------------
 def get_tcmb_usd_rate() -> float:
     url = "https://www.tcmb.gov.tr/kurlar/today.xml"
@@ -135,75 +135,68 @@ def get_tcmb_usd_rate() -> float:
 
 def fetch_tefas_data(fon_kodu: str) -> dict:
     fon_kodu = fon_kodu.upper()
-    url = f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={fon_kodu}"
+    url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
+    
+    # Hafta sonu veya tatillere takılmamak için son 7 günlük pencere sorgulanır
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=7)
+
+    payload = {
+        "fontip": "YAT",
+        "sorgutipi": "1",
+        "bastarih": start_date.strftime("%d.%m.%Y"),
+        "bittarih": end_date.strftime("%d.%m.%Y"),
+        "fonkod": fon_kodu
+    }
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.tefas.gov.tr/"
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": "https://www.tefas.gov.tr",
+        "Referer": "https://www.tefas.gov.tr/FonAnaliz.aspx"
     }
 
     try:
-        response = async_requests.get(url, headers=headers, impersonate="chrome", timeout=15)
+        response = async_requests.post(url, data=payload, headers=headers, impersonate="chrome", timeout=15)
         if response.status_code == 200:
-            html = response.text
+            res_json = response.json()
+            data_list = res_json.get("data", [])
 
-            # 1. Fon Adı Parse (MainContent_LabelFonAd)
-            fon_adi = f"{fon_kodu} Yatırım Fonu"
-            match_adi = re.search(r'id="MainContent_LabelFonAd"[^>]*>([^<]+)<', html, re.IGNORECASE)
-            if match_adi:
-                fon_adi = match_adi.group(1).strip()
+            if data_list:
+                # En güncel kayıt listenin son elemanıdır
+                latest = data_list[-1]
 
-            # 2. Canlı Fiyat Parse (MainContent_LabelFiyat)
-            fiyat_tl = None
-            match_fiyat = re.search(r'id="MainContent_LabelFiyat"[^>]*>([\d\.,]+)<', html, re.IGNORECASE)
-            if not match_fiyat:
-                match_fiyat = re.search(r'Son Fiyat\s*\(TL\)[^<]*</span>\s*<span>\s*([\d\.,]+)\s*</span>', html, re.IGNORECASE)
-            if not match_fiyat:
-                match_fiyat = re.search(r'<span>([\d\.,]+)</span>\s*<span[^>]*>Son Fiyat', html, re.IGNORECASE)
+                fon_adi = latest.get("FONUNVAN", f"{fon_kodu} Yatırım Fonu")
+                fiyat_tl = float(latest.get("FIYAT", 0.0))
 
-            if match_fiyat:
-                fiyat_str = match_fiyat.group(1).strip().replace(".", "").replace(",", ".")
-                fiyat_tl = float(fiyat_str)
+                # Günlük değişim hesaplama
+                gunluk_getiri = "%0.00"
+                if len(data_list) >= 2:
+                    prev_fiyat = float(data_list[-2].get("FIYAT", fiyat_tl))
+                    if prev_fiyat > 0:
+                        change = ((fiyat_tl - prev_fiyat) / prev_fiyat) * 100
+                        gunluk_getiri = f"%{change:+.2f}"
+
+                usd_rate = get_tcmb_usd_rate()
+                fiyat_usd = round(fiyat_tl / usd_rate, 6) if usd_rate > 0 else 0.0
+
+                return {
+                    "success": True,
+                    "fon_kodu": fon_kodu,
+                    "fon_adi": fon_adi,
+                    "fiyat_tl": fiyat_tl,
+                    "fiyat_usd": fiyat_usd,
+                    "gunluk_getiri": gunluk_getiri,
+                    "aylik_getiri": "%--",
+                    "tarih": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                }
             else:
-                return {"success": False, "error": f"'{fon_kodu}' için TEFAS'ta fiyat bulunamadı."}
-
-            # 3. Günlük Getiri Parse
-            gunluk_getiri = "%0.00"
-            match_gunluk = re.search(r'id="MainContent_LabelGunlukGetiri"[^>]*>([^<]+)<', html, re.IGNORECASE)
-            if not match_gunluk:
-                match_gunluk = re.search(r'Günlük Getiri\s*\(%\)[^<]*</span>\s*<span>\s*([^<]+)\s*</span>', html, re.IGNORECASE)
-            if match_gunluk:
-                gunluk_getiri = match_gunluk.group(1).strip()
-                if not gunluk_getiri.startswith("%"):
-                    gunluk_getiri = f"%{gunluk_getiri}"
-
-            # 4. Aylık Getiri Parse
-            aylik_getiri = "%0.00"
-            match_aylik = re.search(r'id="MainContent_LabelAylikGetiri"[^>]*>([^<]+)<', html, re.IGNORECASE)
-            if not match_aylik:
-                match_aylik = re.search(r'1 Ay\s*\(%\)[^<]*</span>\s*<span>\s*([^<]+)\s*</span>', html, re.IGNORECASE)
-            if match_aylik:
-                aylik_getiri = match_aylik.group(1).strip()
-                if not aylik_getiri.startswith("%"):
-                    aylik_getiri = f"%{aylik_getiri}"
-
-            usd_rate = get_tcmb_usd_rate()
-            fiyat_usd = round(fiyat_tl / usd_rate, 6)
-
-            return {
-                "success": True,
-                "fon_kodu": fon_kodu,
-                "fon_adi": fon_adi,
-                "fiyat_tl": fiyat_tl,
-                "fiyat_usd": fiyat_usd,
-                "gunluk_getiri": gunluk_getiri,
-                "aylik_getiri": aylik_getiri,
-                "tarih": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-            }
+                return {"success": False, "error": f"'{fon_kodu}' TEFAS veritabanında bulunamadı."}
         else:
-            return {"success": False, "error": f"HTTP {response.status_code}"}
+            return {"success": False, "error": f"TEFAS API Yanıt Vermedi (HTTP {response.status_code})"}
     except Exception as e:
-        logger.error(f"TEFAS Hatası ({fon_kodu}): {e}")
-        return {"success": False, "error": str(e)}
+        logger.error(f"TEFAS API Hatası ({fon_kodu}): {e}")
+        return {"success": False, "error": "TEFAS bağlantı hatası."}
 
 # ---------------------------------------------------------------------------
 # PORTFÖY ÖZETİ TASARIMI
@@ -310,7 +303,7 @@ async def portfoy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def fon_sorgu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ Lütfen sorgulamak istediğiniz fon kodunu yazın.\nÖrnek: `/fon AAL`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Lütfen sorgulamak istediğiniz fon kodunu yazın.\nÖrnek: `/fon TP2`", parse_mode="Markdown")
         return
 
     fon_kodu = context.args[0].upper()
@@ -324,7 +317,6 @@ async def fon_sorgu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 **Fiyat:** `{data['fiyat_tl']} TL`\n"
             f"💵 **Dolar Karşılığı:** `${data['fiyat_usd']}`\n"
             f"📊 **Günlük Getiri:** {data['gunluk_getiri']}\n"
-            f"🚀 **Aylık Getiri:** {data['aylik_getiri']}\n"
             f"⏱️ **Güncelleme:** {data['tarih']}"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
@@ -354,10 +346,10 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"💵 **Mevcut Nakit:** {nakit:.2f} TL (${usd:.2f})\n\nGüncellemek için: `/nakit <MIKTAR>`", parse_mode="Markdown")
 
     elif "Fon Ara" in text:
-        await update.message.reply_text("🔍 Fon aramak için: `/fon <KOD>` (Örn: `/fon AAL`)", parse_mode="Markdown")
+        await update.message.reply_text("🔍 Fon aramak için: `/fon <KOD>` (Örn: `/fon TP2`)", parse_mode="Markdown")
 
     elif "Fon Ekle" in text:
-        await update.message.reply_text("➕ Fon eklemek için: `/ekle <KOD> <ADET> <MALİYET>`\nÖrnek: `/ekle AAL 10 3.402`", parse_mode="Markdown")
+        await update.message.reply_text("➕ Fon eklemek için: `/ekle <KOD> <ADET> <MALİYET>`\nÖrnek: `/ekle TP2 100 2.084`", parse_mode="Markdown")
 
     elif "Fon Sil" in text:
         await update.message.reply_text("🗑️ Fon silmek için: `/sil <KOD>`", parse_mode="Markdown")
@@ -367,7 +359,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def ekle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 3:
-        await update.message.reply_text("⚠️ Örnek kullanım:\n`/ekle AAL 10 3.402`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Örnek kullanım:\n`/ekle TP2 100 2.084`", parse_mode="Markdown")
         return
 
     try:
