@@ -78,7 +78,6 @@ def fetch_usd_rate() -> float:
     except Exception:
         pass
     
-    # Yedek API
     try:
         res = requests.get("https://open.er-api.com/v6/latest/USD", timeout=5)
         if res.status_code == 200:
@@ -87,7 +86,7 @@ def fetch_usd_rate() -> float:
     except Exception:
         pass
     
-    return 34.0  # Bağlantı koparsa varsayılan ortalama kur
+    return 34.0
 
 # TEFAS Fon Fiyatı Çekici
 def fetch_price(symbol: str) -> float:
@@ -160,7 +159,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Kullanıcı Ayarlarını Getir
 def get_user_settings(user_id: int):
     conn = sqlite3.connect("portfolio.db")
     cursor = conn.cursor()
@@ -171,7 +169,6 @@ def get_user_settings(user_id: int):
         return {"hide": bool(row[0]), "currency": row[1], "notify": bool(row[2])}
     return {"hide": False, "currency": "BOTH", "notify": True}
 
-# Dinamik Ana Menü Klavyesi
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         [
@@ -185,7 +182,6 @@ def get_main_keyboard():
         resize_keyboard=True
     )
 
-# --- VERİTABANI İŞLEMLERİ ---
 def db_add_asset(user_id: int, symbol: str, amount: float, cost: float):
     symbol = symbol.upper().strip()
     conn = sqlite3.connect("portfolio.db")
@@ -242,8 +238,6 @@ def db_set_cash(user_id: int, amount: float):
     conn.close()
     return amount
 
-# --- BOT KOMUTLARI & HANDLERLARI ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📊 *Midas & TEFAS Portföy Takip Botu*\n\n"
@@ -254,7 +248,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# Sadeleştirilmiş ve Kısa Portföy Özeti
 async def portfoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     items = db_get_portfolio(user_id)
@@ -296,7 +289,7 @@ async def portfoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += f"🔹 *{symbol}*: `{fmt(curr_val, 2)} TL` ({icon} `{pnl_str}`)\n"
             elif curr_pref == "USD":
                 text += f"🔹 *{symbol}*: `{fmt_usd(curr_val/usd_rate)}` ({icon} `{pnl_str}`)\n"
-            else: # BOTH
+            else:
                 text += f"🔹 *{symbol}*: `{fmt(curr_val, 2)} TL` | `{fmt_usd(curr_val/usd_rate)}` ({icon} `{pnl_str}`)\n"
 
     text += "───────────────────────────\n"
@@ -316,14 +309,13 @@ async def portfoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"💵 *Nakit:* `{fmt_usd(cash_bal/usd_rate)}`\n"
             text += f"📊 *Toplam Portföy:* `{fmt_usd(total_val_with_cash_tl/usd_rate)}`\n"
             text += f"{total_icon} *K/Z:* `{fmt_usd(total_pnl_tl/usd_rate)}` (%{total_pnl_pct:.2f})\n"
-        else: # BOTH
+        else:
             text += f"💵 *Nakit:* `{fmt(cash_bal, 2)} TL` (`{fmt_usd(cash_bal/usd_rate)}`)\n"
             text += f"📊 *Toplam Portföy:* `{fmt(total_val_with_cash_tl, 2)} TL` (`{fmt_usd(total_val_with_cash_tl/usd_rate)}`)\n"
             text += f"{total_icon} *K/Z:* `{fmt(total_pnl_tl, 2)} TL` / `{fmt_usd(total_pnl_tl/usd_rate)}` (%{total_pnl_pct:.2f})\n"
 
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# --- AYARLAR MENÜSÜ & CALLBACK'LER ---
 async def ayarlar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     settings = get_user_settings(user_id)
@@ -392,7 +384,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await ayarlar_menu(update, context)
 
-# --- DİĞER MODÜLLER ---
 async def grafik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     items = db_get_portfolio(user_id)
@@ -635,9 +626,20 @@ async def ekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         symbol = context.args[0].upper()
         amount = float(context.args[1].replace(',', '.'))
-        cost = float(context.args[2].replace(',', '.'))
+        
+        raw_cost_str = context.args[2]
+        if '.' in raw_cost_str and ',' in raw_cost_str:
+            raw_cost_str = raw_cost_str.replace('.', '').replace(',', '.')
+        elif raw_cost_str.count('.') > 1:
+            raw_cost_str = raw_cost_str.replace('.', '')
+        elif '.' in raw_cost_str and len(raw_cost_str.split('.')[1]) > 2:
+            raw_cost_str = raw_cost_str.replace('.', '')
+        else:
+            raw_cost_str = raw_cost_str.replace(',', '.')
+
+        cost = float(raw_cost_str)
         db_add_asset(user_id, symbol, amount, cost)
-        await update.message.reply_text(f"✅ *{symbol}* eklendi!\nAdet: `{fmt(amount, 2)}` | Maliyet: `{fmt(cost, 6)} TL`", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ *{symbol}* eklendi!\nAdet: `{fmt(amount, 2)}` | Maliyet: `{fmt(cost, 4)} TL`", parse_mode="Markdown")
     except ValueError:
         await update.message.reply_text("❌ Lütfen sayıları doğru yazın.")
 
@@ -650,7 +652,6 @@ async def sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_remove_asset(user_id, symbol)
     await update.message.reply_text(f"🗑️ *{symbol}* portföyden silindi.", parse_mode="Markdown")
 
-# --- ARKA PLAN FİYAT ARTIŞ & BİLDİRİM TAKİPÇİSİ ---
 def start_price_monitor():
     async def monitor():
         from telegram import Bot
@@ -724,7 +725,6 @@ def main():
             logging.info("Bot başlatılıyor...")
             application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-            # Komutlar
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CommandHandler("ekle", ekle))
             application.add_handler(CommandHandler("sil", sil))
@@ -735,10 +735,8 @@ def main():
             application.add_handler(CommandHandler("takipsil", takip_sil_cmd))
             application.add_handler(CommandHandler("ara", fon_ara_cmd))
 
-            # Inline Callbacks
             application.add_handler(CallbackQueryHandler(settings_callback))
 
-            # Menü Buton Yakalayıcılar
             application.add_handler(MessageHandler(filters.Regex(r"^📊 Portföyüm$"), portfoy))
             application.add_handler(MessageHandler(filters.Regex(r"^📈 Grafik$"), grafik))
             application.add_handler(MessageHandler(filters.Regex(r"^👀 Takip Listesi$"), takip_listesi_view))
