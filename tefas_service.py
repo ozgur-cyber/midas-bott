@@ -16,7 +16,6 @@ class TefasService:
 
     def _init_session(self):
         try:
-            # TEFAS'tan gerekli çerezleri alıyoruz
             self.session.get("https://www.tefas.gov.tr/FonKarsilastirma.aspx", headers=self.headers, timeout=5)
         except Exception as e:
             logging.error(f"TEFAS Oturum Hatasi: {e}")
@@ -25,8 +24,8 @@ class TefasService:
         code_clean = code.upper().strip()
         today = datetime.now()
         
-        # Son 7 gunun verisini isteyelim (Hafta sonu/tatil durumlarina karsi)
-        start_date = (today - timedelta(days=7)).strftime("%d.%m.%Y")
+        # Son 10 günün tarihsel verisini çekelim
+        start_date = (today - timedelta(days=10)).strftime("%d.%m.%Y")
         end_date = today.strftime("%d.%m.%Y")
 
         payload = {
@@ -43,22 +42,30 @@ class TefasService:
             if res.status_code == 200:
                 json_data = res.json()
                 data = json_data.get("data", [])
-                if data:
-                    # En son tarihli kaydi alalim
-                    last_data = data[0]
+                if data and len(data) > 0:
+                    # EN GÜNCEL FİYAT: Listenin en sonundaki elemandır (data[-1])
+                    latest = data[-1]
+                    price = float(latest.get("FIYAT", 0) or 0)
+                    title = latest.get("FONUNVAN", code_clean)
                     
+                    # GÜNLÜK DEĞİŞİM HESABI: (Bugün - Dün) / Dün * 100
+                    daily_return = 0.0
+                    if len(data) >= 2:
+                        prev_price = float(data[-2].get("FIYAT", 0) or 0)
+                        if prev_price > 0:
+                            daily_return = ((price - prev_price) / prev_price) * 100
+
                     class FundInfo:
                         pass
                     
                     info = FundInfo()
-                    info.price = float(last_data.get("FIYAT", 0) or 0)
-                    info.title = last_data.get("FONUNVAN", code_clean)
-                    info.daily_return = float(last_data.get("GETIRI1D", 0) or 0)
+                    info.price = price
+                    info.title = title
+                    info.daily_return = round(daily_return, 2)
                     return info
         except Exception as e:
             logging.error(f"TEFAS API Çekme Hatası ({code_clean}): {e}")
 
-        # Başarısız olursa boş nesne döndür
         class DummyInfo:
             price = 0.0
             title = code_clean
