@@ -453,7 +453,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["reset_done"] = False
     get_user_portfolio(context)
     chat_id = update.effective_chat.id
-    if not context.job_queue.get_jobs_by_name(str(chat_id)):
+    if context.job_queue and not context.job_queue.get_jobs_by_name(str(chat_id)):
         context.job_queue.run_repeating(dynamic_price_checker, interval=900, first=5, chat_id=chat_id, name=str(chat_id))
     await update.message.reply_text("🤖 **Midas Pro Fon Takip Botu**\n\n✨ Bot aktif edildi!", reply_markup=MAIN_KEYBOARD, parse_mode="Markdown")
 
