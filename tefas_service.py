@@ -3,13 +3,14 @@ import logging
 
 class TefasService:
     def __init__(self):
-        self.base_url = "https://www.tefas.gov.tr/api/DB/"
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
 
     def get_fund_info(self, code):
         try:
-            # TEFAS canlı veri servisi çağrısı
             url = f"https://fontur.com.tr/api/fon/{code.upper()}"
-            res = requests.get(url, timeout=5)
+            res = requests.get(url, headers=self.headers, timeout=5)
             if res.status_code == 200:
                 data = res.json()
                 class FundInfo:
