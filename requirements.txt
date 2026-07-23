@@ -1,4 +1,7 @@
 python-telegram-bot>=20.0
-requests
-beautifulsoup4
-Flask
+pytesseract
+pillow
+matplotlib
+tefas-service
+pytz
+numpy
