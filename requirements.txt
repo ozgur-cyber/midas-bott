@@ -4,5 +4,4 @@ urllib3
 pytz
 numpy
 matplotlib
-pytesseract
 Pillow

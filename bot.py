@@ -11,7 +11,6 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from PIL import Image
-import pytesseract
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
@@ -280,7 +279,6 @@ def build_portfolio_text(portfolio, cash):
 def process_ocr_image(image_path):
     try:
         img = Image.open(image_path)
-        raw_text = pytesseract.image_to_string(img)
         
         detected_code = None
         for word in re.findall(r'\b[A-Z0-9]{3}\b', raw_text.upper()):
