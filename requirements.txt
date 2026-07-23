@@ -1,7 +1,4 @@
-python-telegram-bot>=20.0
-pytesseract
-pillow
-matplotlib
-pytz
-numpy
+python-telegram-bot[job-queue]==20.7
 requests
+urllib3
+pytz
