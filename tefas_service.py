@@ -24,8 +24,8 @@ class TefasService:
         code_clean = code.upper().strip()
         today = datetime.now()
         
-        # Son 10 günün tarihsel verisini çekelim
-        start_date = (today - timedelta(days=10)).strftime("%d.%m.%Y")
+        # Son 14 gunun verisini isteyelim
+        start_date = (today - timedelta(days=14)).strftime("%d.%m.%Y")
         end_date = today.strftime("%d.%m.%Y")
 
         payload = {
@@ -41,14 +41,17 @@ class TefasService:
             
             if res.status_code == 200:
                 json_data = res.json()
-                data = json_data.get("data", [])
-                if data and len(data) > 0:
-                    # EN GÜNCEL FİYAT: Listenin en sonundaki elemandır (data[-1])
+                raw_data = json_data.get("data", [])
+                if raw_data:
+                    # TARIH milisaniyesine gore eskidenden yeniye KESIN SIRALAMA yapıyoruz
+                    data = sorted(raw_data, key=lambda x: x.get("TARIH", 0))
+                    
+                    # En son tarihli (en guncel) veri
                     latest = data[-1]
                     price = float(latest.get("FIYAT", 0) or 0)
                     title = latest.get("FONUNVAN", code_clean)
                     
-                    # GÜNLÜK DEĞİŞİM HESABI: (Bugün - Dün) / Dün * 100
+                    # Gunluk degisim hesabi (Bugun vs Bir onceki is gunu)
                     daily_return = 0.0
                     if len(data) >= 2:
                         prev_price = float(data[-2].get("FIYAT", 0) or 0)
@@ -64,7 +67,7 @@ class TefasService:
                     info.daily_return = round(daily_return, 2)
                     return info
         except Exception as e:
-            logging.error(f"TEFAS API Çekme Hatası ({code_clean}): {e}")
+            logging.error(f"TEFAS API Cekme Hatasi ({code_clean}): {e}")
 
         class DummyInfo:
             price = 0.0
